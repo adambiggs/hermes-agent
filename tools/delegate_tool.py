@@ -2860,6 +2860,77 @@ def _build_role_param_description() -> str:
     )
 
 
+def _list_delegation_providers() -> List[tuple]:
+    """Return ``[(name, cap_or_None), ...]`` for providers usable as delegation
+    targets — both the new ``providers:`` dict and the legacy
+    ``custom_providers:`` list. ``cap`` is the declared ``delegation_toolsets``
+    allowlist (raw, for display) when present, else ``None``.
+
+    Side-effect free and best-effort: any failure yields an empty list so
+    tool-schema generation never breaks on a config hiccup.
+    """
+
+    def _raw_cap(entry: dict):
+        cap = entry.get("delegation_toolsets")
+        if isinstance(cap, str):
+            return [cap]
+        return cap if isinstance(cap, list) else None
+
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+    out: List[tuple] = []
+    seen = set()
+    providers = cfg.get("providers")
+    if isinstance(providers, dict):
+        for name, entry in providers.items():
+            if isinstance(entry, dict) and name and name not in seen:
+                seen.add(name)
+                out.append((name, _raw_cap(entry)))
+    custom = cfg.get("custom_providers")
+    if isinstance(custom, list):
+        for entry in custom:
+            if isinstance(entry, dict):
+                name = entry.get("name")
+                if name and name not in seen:
+                    seen.add(name)
+                    out.append((name, _raw_cap(entry)))
+    return out
+
+
+def _build_provider_param_description() -> str:
+    """Compose the 'provider' parameter description, enumerating the providers
+    actually configured so the model can discover routing targets by name
+    without being told they exist."""
+    base = (
+        "Route this subagent to a configured provider by name instead of "
+        "inheriting your own model — hand narrow, well-scoped grunt work "
+        "(bulk reads, simple transforms, first-pass triage) to a cheaper/faster "
+        "local model while you stay on your own model for judgment and synthesis. "
+    )
+    provs = _list_delegation_providers()
+    if not provs:
+        return base + "No delegation providers are currently configured."
+    parts = []
+    for name, cap in provs:
+        if cap is not None:
+            allowed = ", ".join(cap) if cap else "none"
+            parts.append(f"'{name}' (restricted to toolsets: {allowed})")
+        else:
+            parts.append(f"'{name}'")
+    return (
+        base
+        + "Configured providers you can route to: "
+        + "; ".join(parts)
+        + ". A provider's toolset restriction (shown above) is enforced no matter "
+        "what toolsets you request for the task."
+    )
+
+
 def _build_dynamic_schema_overrides() -> dict:
     """Return per-call schema overrides reflecting current config.
 
@@ -2876,6 +2947,9 @@ def _build_dynamic_schema_overrides() -> dict:
     }
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
     overrides_params["properties"]["role"]["description"] = _build_role_param_description()
+    overrides_params["properties"]["provider"]["description"] = (
+        _build_provider_param_description()
+    )
     return {
         "description": _build_top_level_description(),
         "parameters": overrides_params,
