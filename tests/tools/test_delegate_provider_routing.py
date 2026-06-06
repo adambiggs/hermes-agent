@@ -21,7 +21,10 @@ from tools.delegate_tool import (
     DELEGATE_TASK_SCHEMA,
     _apply_toolset_cap,
     _build_child_agent,
+    _build_dynamic_schema_overrides,
+    _build_provider_param_description,
     _get_provider_toolset_cap,
+    _list_delegation_providers,
     _normalize_cap,
     _resolve_task_credentials,
     delegate_task,
@@ -161,6 +164,61 @@ class TestGetProviderToolsetCap:
         }
         with patch("hermes_cli.config.load_config", return_value=cfg):
             assert _get_provider_toolset_cap("lmstudio-mac") is None
+
+
+class TestProviderEnumeration:
+    """The schema must advertise configured providers so the model can route
+    by name without being told they exist."""
+
+    def test_lists_providers_from_both_config_formats(self):
+        cfg = {
+            "providers": {"new-style": {"base_url": "http://a/v1"}},
+            "custom_providers": [
+                {"name": "lmstudio-mac", "delegation_toolsets": ["file"]}
+            ],
+        }
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            provs = dict(_list_delegation_providers())
+        assert provs["new-style"] is None
+        assert provs["lmstudio-mac"] == ["file"]
+
+    def test_provider_description_enumerates_names_and_caps(self):
+        cfg = {
+            "custom_providers": [
+                {"name": "lmstudio-mac", "delegation_toolsets": ["file"]}
+            ]
+        }
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            desc = _build_provider_param_description()
+        assert "lmstudio-mac" in desc
+        assert "file" in desc  # the cap is shown
+
+    def test_provider_description_handles_no_providers(self):
+        with patch("hermes_cli.config.load_config", return_value={}):
+            desc = _build_provider_param_description()
+        assert "No delegation providers" in desc
+
+    def test_dynamic_overrides_wire_provider_enumeration_into_schema(self):
+        cfg = {"custom_providers": [{"name": "lmstudio-mac"}]}
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            ov = _build_dynamic_schema_overrides()
+        assert (
+            "lmstudio-mac" in ov["parameters"]["properties"]["provider"]["description"]
+        )
+
+    def test_dynamic_overrides_do_not_mutate_static_schema(self):
+        """Rewriting the provider description must not leak into the module-level
+        static schema (would compound across calls)."""
+        before = DELEGATE_TASK_SCHEMA["parameters"]["properties"]["provider"][
+            "description"
+        ]
+        cfg = {"custom_providers": [{"name": "lmstudio-mac"}]}
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            _build_dynamic_schema_overrides()
+        after = DELEGATE_TASK_SCHEMA["parameters"]["properties"]["provider"][
+            "description"
+        ]
+        assert before == after
 
 
 class TestNormalizeCap:
