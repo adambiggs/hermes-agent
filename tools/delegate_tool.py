@@ -680,6 +680,118 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     return [t for t in toolsets if t not in blocked_toolset_names]
 
 
+def _normalize_provider_name(name: Optional[str]) -> str:
+    """Normalise a provider name for matching.
+
+    Prefers the canonical normaliser from the runtime provider system so cap
+    matching stays consistent with how providers actually resolve. Falls back
+    to a local lowercase/strip if that private symbol ever moves — a security
+    cap must never silently disappear because of an import rename.
+    """
+    try:
+        from hermes_cli.runtime_provider import _normalize_custom_provider_name
+
+        return _normalize_custom_provider_name(name or "")
+    except Exception:  # pragma: no cover - defensive fallback
+        return (name or "").strip().lower()
+
+
+def _normalize_cap(raw, *, source: str) -> Optional[List[str]]:
+    """Coerce a ``delegation_toolsets`` value into a clean allowlist.
+
+    ``None`` → no cap. A scalar is wrapped. Non-list/str is rejected (logged).
+    Always-blocked toolsets are stripped so a misconfigured allowlist can never
+    re-introduce a forbidden toolset. Warns when stripping empties a non-empty
+    cap, since the child would then get zero tools.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        logger.warning(
+            "%s must be a list, got %s; ignoring cap", source, type(raw).__name__
+        )
+        return None
+    stripped = _strip_blocked_tools([str(t).strip() for t in raw if str(t).strip()])
+    if raw and not stripped:
+        logger.warning(
+            "%s resolved to an empty allowlist after removing always-blocked "
+            "toolsets; any subagent capped by it will have no tools.", source,
+        )
+    return stripped
+
+
+def _get_provider_toolset_cap(provider_name: Optional[str]) -> Optional[List[str]]:
+    """Return the operator-pinned toolset allowlist for a named provider.
+
+    A ``providers:`` entry may declare ``delegation_toolsets`` — a hard ceiling
+    on which toolsets any subagent routed to that endpoint may ever receive,
+    independent of what the orchestrating model requests. This is the
+    defense-in-depth lever for routing tasks to a weaker/cheaper local model:
+    even if the orchestrator (or a prompt-injected one) asks for ``terminal``,
+    a child on a provider capped to ``[file, search]`` cannot get it.
+
+    Returns the allowlist when the provider declares one, or ``None`` when the
+    provider is unknown / declares no cap. Note this caps only *named*
+    (``providers:``) endpoints; a delegation target configured via the global
+    ``delegation.base_url`` is capped through ``delegation.delegation_toolsets``
+    instead (see the global fallback in ``delegate_task``).
+    """
+    if not provider_name:
+        return None
+    try:
+        from hermes_cli.config import load_config
+    except Exception as exc:  # pragma: no cover - import guard
+        # load_config is core; if it can't import the agent is broken anyway.
+        logger.warning("Could not load config for provider toolset cap: %s", exc)
+        return None
+
+    requested_norm = _normalize_provider_name(provider_name)
+    providers = (load_config() or {}).get("providers")
+    if not isinstance(providers, dict):
+        return None
+
+    for ep_name, entry in providers.items():
+        if not isinstance(entry, dict):
+            continue
+        names = {ep_name, _normalize_provider_name(ep_name)}
+        display = entry.get("name", "")
+        if display:
+            names.add(display)
+            names.add(_normalize_provider_name(display))
+        if provider_name in names or requested_norm in names:
+            return _normalize_cap(
+                entry.get("delegation_toolsets"),
+                source=f"providers.{ep_name}.delegation_toolsets",
+            )
+    return None
+
+
+def _apply_toolset_cap(
+    toolsets: List[str], cap: Optional[List[str]], *, task_index: Optional[int] = None
+) -> List[str]:
+    """Intersect resolved child toolsets with an operator-pinned allowlist.
+
+    ``cap is None`` → no provider cap configured, return toolsets unchanged.
+    Otherwise keep only toolsets present in the cap (order preserved). This runs
+    AFTER the orchestrator request, parent-ceiling intersection, and blocked-tool
+    strip, so it is the one ceiling the model cannot widen.
+    """
+    if cap is None:
+        return toolsets
+    allowed = set(cap)
+    capped = [t for t in toolsets if t in allowed]
+    dropped = [t for t in toolsets if t not in allowed]
+    if dropped:
+        logger.warning(
+            "Provider toolset cap%s dropped %s (allowed: %s)",
+            f" (task {task_index})" if task_index is not None else "",
+            dropped, sorted(allowed),
+        )
+    return capped
+
+
 def _build_child_progress_callback(
     task_index: int,
     goal: str,
@@ -888,6 +1000,10 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Operator-pinned toolset allowlist for the target provider (from
+    # providers.<name>.delegation_toolsets). None = no cap. Applied as a final
+    # intersection the orchestrating model cannot widen.
+    toolset_cap: Optional[List[str]] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -966,6 +1082,14 @@ def _build_child_agent(
     # test_intersection_preserves_delegation_bound test for the design rationale.
     if effective_role == "orchestrator" and "delegation" not in child_toolsets:
         child_toolsets.append("delegation")
+
+    # Operator-pinned provider cap — the final, model-unwidenable ceiling.
+    # Applied last so it overrides even the orchestrator delegation re-add:
+    # a provider capped to e.g. [file, search] yields a leaf worker no matter
+    # what role or toolsets the orchestrator requested.
+    child_toolsets = _apply_toolset_cap(
+        child_toolsets, toolset_cap, task_index=task_index
+    )
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
@@ -1924,6 +2048,8 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -1993,9 +2119,12 @@ def delegate_task(
     # used by CLI/gateway startup.  When unconfigured, returns None values so
     # children inherit from the parent.
     try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
+        base_creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
+    # Per-task provider/model overrides resolve against the same path, memoised
+    # by (provider, model) so a fan-out to one endpoint resolves it once.
+    _task_creds_cache: Dict[tuple, dict] = {}
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -2017,7 +2146,14 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {
+                "goal": goal,
+                "context": context,
+                "toolsets": toolsets,
+                "role": top_role,
+                "provider": provider,
+                "model": model,
+            }
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2058,6 +2194,35 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            # Per-task provider/model override (falls back to top-level, then
+            # to the once-resolved delegation-config credentials).
+            task_provider = (t.get("provider") or provider or "").strip() or None
+            task_model = (t.get("model") or model or "").strip() or None
+            try:
+                creds = _resolve_task_credentials(
+                    cfg,
+                    parent_agent,
+                    provider_override=task_provider,
+                    model_override=task_model,
+                    base_creds=base_creds,
+                    cache=_task_creds_cache,
+                )
+            except ValueError as exc:
+                return tool_error(f"Task {i}: {exc}")
+            # Operator-pinned toolset ceiling for the resolved endpoint. The cap
+            # is keyed by the name the caller referenced (or the globally
+            # configured delegation.provider), not the post-resolution provider
+            # type, so it matches the operator's providers.<name> entry. When the
+            # delegation target is configured via the global delegation.base_url
+            # (no provider name to key on), fall back to a global
+            # delegation.delegation_toolsets cap so that path can be fenced too.
+            cap_provider = task_provider or (cfg.get("provider") or "").strip() or None
+            toolset_cap = _get_provider_toolset_cap(cap_provider)
+            if toolset_cap is None:
+                toolset_cap = _normalize_cap(
+                    cfg.get("delegation_toolsets"),
+                    source="delegation.delegation_toolsets",
+                )
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2080,6 +2245,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                toolset_cap=toolset_cap,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -2456,6 +2622,50 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+def _resolve_task_credentials(
+    cfg: dict,
+    parent_agent,
+    *,
+    provider_override: Optional[str],
+    model_override: Optional[str],
+    base_creds: dict,
+    cache: dict,
+) -> dict:
+    """Resolve credentials for one task, honoring per-task provider/model.
+
+    When neither override is set, returns ``base_creds`` (the once-resolved
+    delegation-config credentials) unchanged — identical to pre-feature
+    behaviour. Otherwise the task's provider/model are overlaid onto the
+    delegation config and resolved through the same ``_resolve_delegation_
+    credentials`` path (which routes a named provider through the runtime
+    provider system, i.e. the user's ``providers:`` registry).
+
+    Results are memoised in ``cache`` keyed by ``(provider, model)`` so a batch
+    routing many tasks to one endpoint resolves it once.
+    """
+    provider_override = (provider_override or "").strip() or None
+    model_override = (model_override or "").strip() or None
+    if not provider_override and not model_override:
+        return base_creds
+    key = (provider_override or "", model_override or "")
+    if key in cache:
+        return cache[key]
+    overlay = dict(cfg)
+    if provider_override:
+        # Force the provider-resolution path: clear any global direct-endpoint
+        # fields so resolve_runtime_provider(requested=provider) runs instead of
+        # the base_url short-circuit at the top of _resolve_delegation_credentials.
+        overlay["provider"] = provider_override
+        overlay["base_url"] = ""
+        overlay["api_key"] = ""
+        overlay["api_mode"] = ""
+    if model_override:
+        overlay["model"] = model_override
+    creds = _resolve_delegation_credentials(overlay, parent_agent)
+    cache[key] = creds
+    return creds
+
+
 def _load_config() -> dict:
     """Load delegation config from CLI_CONFIG or persistent config.
 
@@ -2703,6 +2913,27 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Route subagents to a configured provider by name (a key in "
+                    "the user's `providers:` config, e.g. a local LM Studio / "
+                    "Ollama endpoint) instead of inheriting your own model. Use "
+                    "this to hand narrow, well-scoped grunt work to a cheaper/"
+                    "faster local model while you stay on your main model. Only "
+                    "reference a provider the user has configured. The operator "
+                    "may pin a hard toolset ceiling on that provider, so the "
+                    "subagent can be restricted regardless of the toolsets you "
+                    "request."
+                ),
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Override the subagent model id (e.g. on the chosen "
+                    "provider). Leave empty to use the provider's default model."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -2717,6 +2948,19 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": f"Toolsets for this specific task. Available: {_TOOLSET_LIST_STR}. Use 'web' for network access, 'terminal' for shell, 'browser' for web interaction.",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Per-task provider override (a configured "
+                                "`providers:` name). Routes this task to that "
+                                "endpoint, e.g. a local model for cheap grunt "
+                                "work. Overrides the top-level 'provider'."
+                            ),
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Per-task model id override on the chosen provider.",
                         },
                         "acp_command": {
                             "type": "string",
@@ -2793,6 +3037,8 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        provider=args.get("provider"),
+        model=args.get("model"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
