@@ -137,6 +137,31 @@ class TestGetProviderToolsetCap:
         with patch("hermes_cli.config.load_config", return_value=cfg):
             assert _get_provider_toolset_cap("Gemma Local") == ["file"]
 
+    def test_cap_found_on_legacy_custom_providers_list(self):
+        """The cap is honoured on legacy custom_providers entries too (the
+        format the VM actually uses), not just the new providers: dict."""
+        cfg = {
+            "providers": {},
+            "custom_providers": [
+                {
+                    "name": "lmstudio-mac",
+                    "base_url": "http://192.168.1.145:1234/v1",
+                    "delegation_toolsets": ["file", "search"],
+                }
+            ],
+        }
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            assert _get_provider_toolset_cap("lmstudio-mac") == ["file", "search"]
+
+    def test_custom_providers_entry_without_cap_returns_none(self):
+        cfg = {
+            "custom_providers": [
+                {"name": "lmstudio-mac", "base_url": "http://x:1234/v1"}
+            ]
+        }
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            assert _get_provider_toolset_cap("lmstudio-mac") is None
+
 
 class TestNormalizeCap:
     """Coercion + always-blocked stripping shared by named and global caps."""
