@@ -348,7 +348,12 @@ def _chat_messages_to_responses_input(
                             "content": normalized_content_parts,
                         }
                         item_id = raw_item.get("id")
-                        if isinstance(item_id, str) and item_id.strip():
+                        # chatgpt.com/backend-api/codex caps input item ids at
+                        # 64 chars (string_above_max_length). With store=False
+                        # the backend returns ~400-char encrypted message ids;
+                        # echoing them back 400s. id is optional on replayed
+                        # assistant messages, so keep only backend-legal ids.
+                        if isinstance(item_id, str) and 0 < len(item_id.strip()) <= 64:
                             replay_item["id"] = item_id.strip()
                         phase = raw_item.get("phase")
                         if isinstance(phase, str) and phase.strip():
@@ -602,7 +607,8 @@ def _preflight_codex_input_items(raw_items: Any) -> List[Dict[str, Any]]:
                 "content": normalized_content,
             }
             item_id = item.get("id")
-            if isinstance(item_id, str) and item_id.strip():
+            # See replay path above: codex backend rejects ids >64 chars.
+            if isinstance(item_id, str) and 0 < len(item_id.strip()) <= 64:
                 normalized_item["id"] = item_id.strip()
             phase = item.get("phase")
             if isinstance(phase, str) and phase.strip():

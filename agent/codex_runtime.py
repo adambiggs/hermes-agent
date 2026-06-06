@@ -251,7 +251,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 # but get_final_response() can return an empty output list.
                 # Backfill from collected items or synthesize from deltas.
                 _out = getattr(final_response, "output", None)
-                if isinstance(_out, list) and not _out:
+                # chatgpt.com/backend-api/codex omits output entirely
+                # from the response.completed payload (None, not []).
+                if not _out:
                     if collected_output_items:
                         final_response.output = list(collected_output_items)
                         logger.debug(
@@ -285,6 +287,22 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 "Codex Responses stream transport failed; falling back to create(stream=True). %s error=%s",
                 agent._client_log_context(),
                 exc,
+            )
+            return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+        except TypeError as exc:
+            # OpenAI SDK 2.24.x parse_response() crashes on response.completed
+            # events whose response.output is None — the chatgpt.com/backend-api
+            # /codex backend (gpt-5.5) streams output_item events but omits
+            # output from the final completed payload, so the SDK's
+            # accumulator hits for x in None. Fall back to the lower-level
+            # responses.create(stream=True) path which iterates raw SSE
+            # without invoking parse_response.
+            if "is not iterable" not in str(exc):
+                raise
+            logger.debug(
+                "Codex Responses stream parse_response choked (None output); "
+                "falling back to create(stream=True). %s err=%s",
+                agent._client_log_context(), exc,
             )
             return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
         except RuntimeError as exc:
@@ -414,7 +432,10 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
             if terminal_response is not None:
                 # Backfill empty output from collected stream events
                 _out = getattr(terminal_response, "output", None)
-                if isinstance(_out, list) and not _out:
+                # chatgpt.com/backend-api/codex omits output entirely
+                # from the response.completed payload (None, not []), so
+                # accept both shapes here.
+                if not _out:
                     if collected_output_items:
                         terminal_response.output = list(collected_output_items)
                         logger.debug(
