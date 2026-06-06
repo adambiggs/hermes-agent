@@ -733,10 +733,13 @@ def _get_provider_toolset_cap(provider_name: Optional[str]) -> Optional[List[str
     a child on a provider capped to ``[file, search]`` cannot get it.
 
     Returns the allowlist when the provider declares one, or ``None`` when the
-    provider is unknown / declares no cap. Note this caps only *named*
-    (``providers:``) endpoints; a delegation target configured via the global
-    ``delegation.base_url`` is capped through ``delegation.delegation_toolsets``
-    instead (see the global fallback in ``delegate_task``).
+    provider is unknown / declares no cap. Matches the same provider sources the
+    runtime resolver does — both the new ``providers:`` dict and the legacy
+    ``custom_providers:`` list — so the cap can't be silently skipped just
+    because an endpoint is declared in the older format. A delegation target
+    configured via the global ``delegation.base_url`` (no provider name to key
+    on) is capped through ``delegation.delegation_toolsets`` instead (see the
+    global fallback in ``delegate_task``).
     """
     if not provider_name:
         return None
@@ -748,23 +751,35 @@ def _get_provider_toolset_cap(provider_name: Optional[str]) -> Optional[List[str
         return None
 
     requested_norm = _normalize_provider_name(provider_name)
-    providers = (load_config() or {}).get("providers")
-    if not isinstance(providers, dict):
-        return None
+    cfg = load_config() or {}
 
-    for ep_name, entry in providers.items():
-        if not isinstance(entry, dict):
-            continue
-        names = {ep_name, _normalize_provider_name(ep_name)}
-        display = entry.get("name", "")
-        if display:
-            names.add(display)
-            names.add(_normalize_provider_name(display))
-        if provider_name in names or requested_norm in names:
-            return _normalize_cap(
-                entry.get("delegation_toolsets"),
-                source=f"providers.{ep_name}.delegation_toolsets",
-            )
+    def _entry_matches(entry: dict, key: Optional[str] = None) -> bool:
+        names = set()
+        for candidate in (key, entry.get("name", "")):
+            if candidate:
+                names.add(candidate)
+                names.add(_normalize_provider_name(candidate))
+        return provider_name in names or requested_norm in names
+
+    # New-style providers: {name: {...}}
+    providers = cfg.get("providers")
+    if isinstance(providers, dict):
+        for ep_name, entry in providers.items():
+            if isinstance(entry, dict) and _entry_matches(entry, ep_name):
+                return _normalize_cap(
+                    entry.get("delegation_toolsets"),
+                    source=f"providers.{ep_name}.delegation_toolsets",
+                )
+
+    # Legacy custom_providers: [{name: ..., ...}]
+    custom = cfg.get("custom_providers")
+    if isinstance(custom, list):
+        for entry in custom:
+            if isinstance(entry, dict) and _entry_matches(entry):
+                return _normalize_cap(
+                    entry.get("delegation_toolsets"),
+                    source=f"custom_providers[{entry.get('name', '?')}].delegation_toolsets",
+                )
     return None
 
 
