@@ -259,6 +259,110 @@ def _reset_allow_private_cache() -> None:
     _cached_allow_private = False
 
 
+# ---------------------------------------------------------------------------
+# Trusted egress proxy: a private address that IS the policy enforcement point
+# ---------------------------------------------------------------------------
+# Some deployments route outbound traffic through a transparent proxy on a
+# private address, so arbitrary public hostnames resolve to it (either by
+# design, to give the proxy visibility, or because a filtering resolver
+# sinkholes un-approved names there).  Reaching that address is not SSRF —
+# it is the egress control point, and it applies its own policy.
+#
+# Refusing it pre-flight is actively harmful: the request never reaches the
+# proxy, so the proxy can neither allow it nor report it, and any
+# approval/audit workflow built on observing attempts is silently starved.
+#
+# The exemption is deliberately narrow.  The host running the proxy usually
+# also runs unrelated internal services, so it is scoped to the proxy's own
+# ports (default 80/443) rather than the whole address, and it never applies
+# to the always-blocked metadata floor.
+_DEFAULT_PROXY_PORTS = frozenset({80, 443})
+_trusted_proxy_resolved = False
+_cached_trusted_proxy: Optional[tuple] = None
+
+
+def _parse_trusted_egress_proxy(raw: str) -> Optional[tuple]:
+    """Parse ``IP[:port[,port...]]`` into ``(ip, ports)``.
+
+    Returns None for anything unparseable — a malformed value must not
+    widen the SSRF boundary.  Only literal IPs are accepted: a hostname
+    could be re-pointed by DNS, which would turn this into a bypass.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+
+    # Split host from ports, tolerating bracketed and bare IPv6.
+    if raw.startswith("["):
+        host, closed, rest = raw[1:].partition("]")
+        if not closed:
+            return None
+        port_spec = rest[1:] if rest.startswith(":") else ""
+    elif raw.count(":") > 1:
+        host, port_spec = raw, ""  # bare IPv6, no ports
+    else:
+        host, _, port_spec = raw.partition(":")
+
+    try:
+        ip = ipaddress.ip_address(host.strip())
+    except ValueError:
+        return None
+
+    port_spec = port_spec.strip()
+    if not port_spec:
+        return (ip, _DEFAULT_PROXY_PORTS)
+
+    ports = set()
+    for chunk in port_spec.split(","):
+        chunk = chunk.strip()
+        if not chunk.isdigit():
+            return None
+        port = int(chunk)
+        if not 1 <= port <= 65535:
+            return None
+        ports.add(port)
+    return (ip, frozenset(ports)) if ports else None
+
+
+def _trusted_egress_proxy() -> Optional[tuple]:
+    """Return ``(ip, ports)`` for the configured egress proxy, else None.
+
+    Checks (in priority order):
+    1. ``HERMES_TRUSTED_EGRESS_PROXY`` env var
+    2. ``security.trusted_egress_proxy`` in config.yaml
+
+    Result is cached for the process lifetime.
+    """
+    global _trusted_proxy_resolved, _cached_trusted_proxy
+    if _trusted_proxy_resolved:
+        return _cached_trusted_proxy
+
+    _trusted_proxy_resolved = True
+    _cached_trusted_proxy = None  # safe default
+
+    raw = os.getenv("HERMES_TRUSTED_EGRESS_PROXY", "").strip()
+    if not raw:
+        try:
+            from hermes_cli.config import read_raw_config
+            cfg = read_raw_config()
+            sec = cfg.get("security", {})
+            if isinstance(sec, dict):
+                raw = str(sec.get("trusted_egress_proxy") or "").strip()
+        except Exception:
+            # Config unavailable (e.g. tests, early import) — keep default
+            raw = ""
+
+    _cached_trusted_proxy = _parse_trusted_egress_proxy(raw)
+    return _cached_trusted_proxy
+
+
+def _reset_trusted_egress_proxy_cache() -> None:
+    """Reset the cached proxy parse — only for tests."""
+    global _trusted_proxy_resolved, _cached_trusted_proxy
+    _trusted_proxy_resolved = False
+    _cached_trusted_proxy = None
+
+
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP should be blocked for SSRF protection."""
     # IPv4-mapped IPv6 addresses (``::ffff:x.x.x.x``) should be checked
@@ -416,6 +520,11 @@ def is_safe_url(url: str) -> bool:
 
         allow_private_ip = _allows_private_ip_resolution(hostname, scheme)
 
+        # A transparent egress proxy is exempt on its own ports only. An
+        # invalid port raises here and fails closed via the outer handler.
+        proxy = _trusted_egress_proxy()
+        port = parsed.port or (443 if scheme == "https" else 80)
+
         # Try to resolve and check IP
         try:
             addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
@@ -445,6 +554,15 @@ def is_safe_url(url: str) -> bool:
                 return False
 
             if not allow_all_private and not allow_private_ip and _is_blocked_ip(ip):
+                if proxy is not None and ip == proxy[0] and port in proxy[1]:
+                    # The egress proxy itself — policy is enforced there, not
+                    # here. Keep checking the remaining addresses so a split
+                    # answer set can still block on a non-proxy private IP.
+                    logger.debug(
+                        "Allowing %s -> %s:%d (security.trusted_egress_proxy)",
+                        hostname, ip_str, port,
+                    )
+                    continue
                 logger.warning(
                     "Blocked request to private/internal address: %s -> %s",
                     hostname, ip_str,

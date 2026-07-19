@@ -624,6 +624,21 @@ When on, web tools, the browser, vision URL fetches, and gateway media downloads
 
 The host-substring guard (which blocks lookalike Unicode domain tricks even when the underlying IP is public) stays on regardless of this setting.
 
+#### Running behind a transparent egress proxy
+
+If Hermes runs behind a transparent egress proxy on a private address, arbitrary public hostnames resolve to that address — either by design, so the proxy can see every attempt, or because a filtering resolver sinkholes un-approved names there. Rejecting those pre-flight is counterproductive: the request never reaches the proxy, so the proxy can neither allow it nor report it, and any approval or audit workflow built on observing attempts never fires.
+
+Point Hermes at the proxy so it treats that address as the enforcement point rather than an SSRF target:
+
+```yaml
+security:
+  trusted_egress_proxy: "10.231.1.1:80,443"   # default: unset
+```
+
+The value is `IP[:port[,port…]]`; ports default to `80,443` when omitted. Only literal IPs are accepted — a hostname could be re-pointed by DNS, which would turn this into a bypass. The env var `HERMES_TRUSTED_EGRESS_PROXY` takes priority over config.
+
+Prefer this over `allow_private_urls` when a proxy is the reason you need private access. It is far narrower: exactly one address, only on its own ports, so unrelated services on the proxy host stay unreachable. Cloud metadata and the whole link-local range remain blocked regardless, as with every other setting here.
+
 ### Tirith Pre-Exec Security Scanning
 
 Hermes integrates [tirith](https://github.com/sheeki03/tirith) for content-level command scanning before execution. Tirith detects threats that pattern matching alone misses:

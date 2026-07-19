@@ -12,6 +12,8 @@ from tools.url_safety import (
     _is_blocked_ip,
     _global_allow_private_urls,
     _reset_allow_private_cache,
+    _trusted_egress_proxy,
+    _reset_trusted_egress_proxy_cache,
 )
 
 import ipaddress
@@ -530,6 +532,182 @@ class TestAllowPrivateUrlsIntegration:
         """Empty URLs are still blocked."""
         monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", "true")
         assert is_safe_url("") is False
+
+
+class TestTrustedEgressProxyParsing:
+    """Tests for parsing the security.trusted_egress_proxy setting."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        _reset_trusted_egress_proxy_cache()
+        yield
+        _reset_trusted_egress_proxy_cache()
+
+    def test_default_is_none(self, monkeypatch):
+        """Unset means no exemption — the SSRF boundary is unchanged."""
+        monkeypatch.delenv("HERMES_TRUSTED_EGRESS_PROXY", raising=False)
+        with patch("hermes_cli.config.read_raw_config", side_effect=Exception("no config")):
+            assert _trusted_egress_proxy() is None
+
+    def test_env_var_with_explicit_ports(self, monkeypatch):
+        """IP:port,port parses into an address and a port set."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        assert _trusted_egress_proxy() == (ipaddress.ip_address("10.231.1.1"), frozenset({80, 443}))
+
+    def test_bare_ip_defaults_to_web_ports(self, monkeypatch):
+        """A bare IP grants only 80/443 — never the whole host."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1")
+        assert _trusted_egress_proxy() == (ipaddress.ip_address("10.231.1.1"), frozenset({80, 443}))
+
+    def test_config_section(self, monkeypatch):
+        """security.trusted_egress_proxy is read from config.yaml."""
+        monkeypatch.delenv("HERMES_TRUSTED_EGRESS_PROXY", raising=False)
+        cfg = {"security": {"trusted_egress_proxy": "192.168.122.1:8080"}}
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+            assert _trusted_egress_proxy() == (
+                ipaddress.ip_address("192.168.122.1"),
+                frozenset({8080}),
+            )
+
+    def test_env_var_overrides_config(self, monkeypatch):
+        """Env var takes priority over config."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.0.0.9:443")
+        cfg = {"security": {"trusted_egress_proxy": "192.168.122.1:80"}}
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+            assert _trusted_egress_proxy() == (ipaddress.ip_address("10.0.0.9"), frozenset({443}))
+
+    @pytest.mark.parametrize("raw", [
+        "not-an-ip:80",
+        "10.231.1.1:notaport",
+        "10.231.1.1:0",
+        "10.231.1.1:70000",
+        "example.com:443",
+        "",
+        "   ",
+    ])
+    def test_malformed_values_yield_no_exemption(self, monkeypatch, raw):
+        """Anything unparseable fails closed to None rather than raising."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", raw)
+        assert _trusted_egress_proxy() is None
+
+    def test_hostname_is_rejected(self, monkeypatch):
+        """Only literal IPs are accepted — a hostname could be re-pointed by DNS."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "proxy.internal:443")
+        assert _trusted_egress_proxy() is None
+
+    def test_result_is_cached(self, monkeypatch):
+        """Second call uses the cached parse."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:443")
+        assert _trusted_egress_proxy() is not None
+        monkeypatch.delenv("HERMES_TRUSTED_EGRESS_PROXY", raising=False)
+        assert _trusted_egress_proxy() is not None
+
+
+class TestTrustedEgressProxyIntegration:
+    """is_safe_url treats a transparent egress proxy as the enforcement point.
+
+    A transparent proxy intercepts outbound traffic, so any hostname may
+    resolve to it. Reaching it is not SSRF — the proxy applies policy. But
+    the exemption must be scoped to the proxy's own ports so that other
+    services on the same host stay unreachable.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        _reset_allow_private_cache()
+        _reset_trusted_egress_proxy_cache()
+        yield
+        _reset_allow_private_cache()
+        _reset_trusted_egress_proxy_cache()
+
+    def test_public_hostname_resolving_to_proxy_is_allowed(self, monkeypatch):
+        """The core case: a sinkholed public domain may reach the proxy."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("10.231.1.1", 0)),
+        ]):
+            assert is_safe_url("https://exa.ai/pricing") is True
+
+    def test_http_port_80_allowed(self, monkeypatch):
+        """Plain http to the proxy is in scope too."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("10.231.1.1", 0)),
+        ]):
+            assert is_safe_url("http://exa.ai/pricing") is True
+
+    def test_non_proxy_port_on_same_host_blocked(self, monkeypatch):
+        """The whole point: co-located host services stay unreachable."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("10.231.1.1", 0)),
+        ]):
+            assert is_safe_url("http://exa.ai:7444/mail/messages") is False
+
+    def test_other_private_ip_still_blocked(self, monkeypatch):
+        """Only the configured proxy address is exempt."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("192.168.1.50", 0)),
+        ]):
+            assert is_safe_url("https://exa.ai/pricing") is False
+
+    def test_loopback_still_blocked(self, monkeypatch):
+        """Localhost is not the proxy."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("127.0.0.1", 0)),
+        ]):
+            assert is_safe_url("https://exa.ai/pricing") is False
+
+    def test_metadata_floor_survives_exemption(self, monkeypatch):
+        """Configuring a proxy must never unblock cloud metadata."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "169.254.169.254:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("169.254.169.254", 0)),
+        ]):
+            assert is_safe_url("http://169.254.169.254/latest/meta-data/") is False
+
+    def test_link_local_floor_survives_exemption(self, monkeypatch):
+        """The whole link-local range stays blocked."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "169.254.42.99:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("169.254.42.99", 0)),
+        ]):
+            assert is_safe_url("http://169.254.42.99/anything") is False
+
+    def test_unconfigured_leaves_boundary_unchanged(self, monkeypatch):
+        """Without the setting, a sinkholed domain is still blocked."""
+        monkeypatch.delenv("HERMES_TRUSTED_EGRESS_PROXY", raising=False)
+        monkeypatch.delenv("HERMES_ALLOW_PRIVATE_URLS", raising=False)
+        with patch("hermes_cli.config.read_raw_config", side_effect=Exception("no config")):
+            with patch("socket.getaddrinfo", return_value=[
+                (2, 1, 6, "", ("10.231.1.1", 0)),
+            ]):
+                assert is_safe_url("https://exa.ai/pricing") is False
+
+    def test_public_ip_unaffected(self, monkeypatch):
+        """Ordinary public destinations are unchanged."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("140.82.116.4", 0)),
+        ]):
+            assert is_safe_url("https://github.com/") is True
+
+    def test_dns_failure_still_blocked(self, monkeypatch):
+        """Fail-closed on DNS is preserved."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror("fail")):
+            assert is_safe_url("https://exa.ai/pricing") is False
+
+    def test_mixed_answers_block_when_any_is_non_proxy_private(self, monkeypatch):
+        """A split answer set must not be rescued by the proxy address."""
+        monkeypatch.setenv("HERMES_TRUSTED_EGRESS_PROXY", "10.231.1.1:80,443")
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("10.231.1.1", 0)),
+            (2, 1, 6, "", ("192.168.1.50", 0)),
+        ]):
+            assert is_safe_url("https://exa.ai/pricing") is False
 
 
 class TestIsAlwaysBlockedUrl:
