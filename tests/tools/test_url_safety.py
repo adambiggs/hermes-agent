@@ -272,6 +272,24 @@ class TestIsSafeUrl:
         with patch("socket.getaddrinfo", side_effect=socket.gaierror("Name resolution failed")):
             assert is_safe_url("https://multimedia.nt.qq.com.cn/download?id=123") is False
 
+    def test_configured_tailnet_app_hostname_allowed_with_cgnat_ip(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url("https://review-surface.example.test/apps/envelop/") is True
+
+    def test_configured_tailnet_app_hostname_exception_is_exact_match(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url("https://evil.review-surface.example.test/apps/") is False
+
+    def test_configured_tailnet_app_hostname_exception_requires_https(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url("http://review-surface.example.test/apps/envelop/") is False
+
 
 class TestAsyncIsSafeUrl:
     """async_is_safe_url must match is_safe_url (runs DNS in a thread pool)."""

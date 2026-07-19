@@ -181,6 +181,10 @@ _ALWAYS_BLOCKED_NETWORKS = (
 # to 198.18.0.0/15 behind local proxy/benchmark infrastructure.
 _TRUSTED_PRIVATE_IP_HOSTS = frozenset({
     "multimedia.nt.qq.com.cn",
+    # An owner-authenticated, tailnet-only mini-app review surface.  Keep
+    # this exact and HTTPS-only via _allows_private_ip_resolution(); granting
+    # all private URLs would unnecessarily weaken the SSRF boundary.
+    "review-surface.example.test",
 })
 
 # 100.64.0.0/10 (CGNAT / Shared Address Space, RFC 6598) is NOT covered by
