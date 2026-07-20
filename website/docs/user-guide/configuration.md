@@ -1912,6 +1912,7 @@ Pre-execution security scanning and secret redaction:
 ```yaml
 security:
   redact_secrets: true           # Redact API key patterns in tool output and logs (on by default)
+  allowed_private_networks: []   # Exempt specific private CIDRs from SSRF blocking (see below)
   tirith_enabled: true           # Enable Tirith security scanning for terminal commands
   tirith_path: "tirith"          # Path to tirith binary (default: "tirith" in $PATH)
   tirith_timeout: 5              # Seconds to wait for tirith scan before timing out
@@ -1923,6 +1924,16 @@ security:
 ```
 
 - `redact_secrets` — when `true`, automatically detects and redacts patterns that look like API keys, tokens, and passwords in tool output before it enters the conversation context and logs. **On by default**. Set to `false` explicitly only when you need raw credential-like strings for debugging or redactor development.
+- `allowed_private_networks` — a CIDR (or list of CIDRs) exempted from SSRF private-IP blocking, for environments where a local resolver maps public domains into private or benchmark space. Far narrower than `allow_private_urls`, which disables the check for *all* private space. An entry may be scoped to specific ports as `"<cidr>:<port>[,<port>]"` — useful when the allowlisted address is a transparent egress proxy sharing a host with unrelated internal services, so only the proxy's own ports are reachable:
+
+  ```yaml
+  security:
+    allowed_private_networks:
+      - 198.18.0.0/15           # whole range, any port
+      - 10.0.0.1/32:80,443      # proxy address, web ports only
+  ```
+
+  Cloud-metadata endpoints are checked *before* this allowlist and can never be exempted, even by listing `169.254.0.0/16`. Invalid entries are logged and skipped. See [Security](./security.md#intentionally-allowing-private-urls).
 - `tirith_enabled` — when `true`, terminal commands are scanned by [Tirith](https://github.com/sheeki03/tirith) before execution to detect potentially dangerous operations.
 - `tirith_path` — path to the tirith binary. Set this if tirith is installed in a non-standard location.
 - `tirith_timeout` — maximum seconds to wait for a tirith scan. Commands proceed if the scan times out.

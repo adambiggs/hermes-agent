@@ -2767,6 +2767,12 @@ DEFAULT_CONFIG = {
     # Pre-exec security scanning via tirith
     "security": {
         "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
+        # Narrower alternative to allow_private_urls: exempt only specific
+        # private ranges. Each entry is a CIDR, optionally scoped to ports as
+        # "<cidr>:<port>[,<port>]" (e.g. "10.0.0.1/32:80,443" for a transparent
+        # egress proxy that shares a host with other internal services). The
+        # cloud-metadata floor is checked first and can never be allowlisted.
+        "allowed_private_networks": [],
         "redact_secrets": True,
         "tirith_enabled": True,
         "tirith_path": "tirith",

@@ -624,6 +624,21 @@ When on, web tools, the browser, vision URL fetches, and gateway media downloads
 
 The host-substring guard (which blocks lookalike Unicode domain tricks even when the underlying IP is public) stays on regardless of this setting.
 
+#### Allowing specific private ranges instead
+
+`allow_private_urls` is all-or-nothing. When only one range is legitimately mapped — a resolver that puts public domains in RFC 2544 benchmark space, or a transparent egress proxy on a fixed address — exempt just that range and leave the rest of the private space protected:
+
+```yaml
+security:
+  allowed_private_networks:
+    - 198.18.0.0/15           # whole range, any port
+    - 10.0.0.1/32:80,443      # proxy address, web ports only
+```
+
+Each entry is a CIDR, optionally suffixed with `:<port>[,<port>…]`. The port form matters when the allowlisted host also runs unrelated internal services: a transparent proxy is the policy enforcement point on its own ports, but the mail or metrics service beside it is not, and should stay unreachable.
+
+Your real LAN, loopback, and CGNAT stay blocked unless you list them. Cloud metadata is checked *before* this allowlist and can never be exempted, even by listing `169.254.0.0/16`. Invalid entries are logged and skipped rather than failing startup.
+
 ### Tirith Pre-Exec Security Scanning
 
 Hermes integrates [tirith](https://github.com/sheeki03/tirith) for content-level command scanning before execution. Tirith detects threats that pattern matching alone misses:

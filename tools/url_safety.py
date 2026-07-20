@@ -285,10 +285,54 @@ _allowed_networks_resolved = False
 _cached_allowed_networks: tuple = ()
 
 
+def _parse_allowed_network_entry(item: Any) -> Optional[tuple]:
+    """Parse one allowlist entry into ``(network, ports)``.
+
+    Accepts ``<cidr>`` (ports is None — every port) or ``<cidr>:<port>[,<port>...]``
+    (ports is a frozenset). Port scoping matters when the allowlisted address is
+    a transparent egress proxy sharing a host with unrelated internal services:
+    the proxy's own ports are the enforcement point, the rest are not.
+
+    Returns None for anything unparseable so the caller can skip it.
+    """
+    raw = str(item).strip()
+    if not raw:
+        return None
+
+    # Try the whole string as a network FIRST so a bare IPv6 address whose last
+    # group is numeric (``fd00::80``) is not misread as a port suffix.
+    try:
+        return (ipaddress.ip_network(raw, strict=False), None)
+    except ValueError:
+        pass
+
+    head, sep, port_spec = raw.rpartition(":")
+    if not sep:
+        return None
+    try:
+        network = ipaddress.ip_network(head.strip(), strict=False)
+    except ValueError:
+        return None
+
+    ports = set()
+    for chunk in port_spec.split(","):
+        chunk = chunk.strip()
+        if not chunk.isdigit():
+            return None
+        port = int(chunk)
+        if not 1 <= port <= 65535:
+            return None
+        ports.add(port)
+    if not ports:
+        return None
+    return (network, frozenset(ports))
+
+
 def _allowed_private_networks() -> tuple:
     """Return the user-trusted private CIDRs from ``security.allowed_private_networks``.
 
-    Accepts a single CIDR string or a list of them. Invalid entries are logged
+    Accepts a single entry or a list. Each entry is ``<cidr>`` or, to narrow it
+    to specific ports, ``<cidr>:<port>[,<port>...]``. Invalid entries are logged
     and skipped. Result is cached for the process lifetime.
     """
     global _allowed_networks_resolved, _cached_allowed_networks
@@ -307,13 +351,14 @@ def _allowed_private_networks() -> tuple:
                 raw = [raw]
             if isinstance(raw, (list, tuple)):
                 for item in raw:
-                    try:
-                        nets.append(ipaddress.ip_network(str(item).strip(), strict=False))
-                    except ValueError:
+                    parsed = _parse_allowed_network_entry(item)
+                    if parsed is None:
                         logger.warning(
                             "Ignoring invalid security.allowed_private_networks entry: %r",
                             item,
                         )
+                    else:
+                        nets.append(parsed)
     except Exception:
         # Config unavailable (tests, early import) — keep empty allowlist
         pass
@@ -482,6 +527,9 @@ def is_safe_url(url: str) -> bool:
         # User-trusted private CIDRs (e.g. a local DNS resolver's 198.18.0.0/15).
         # Checked per-IP below, AFTER the always-blocked metadata floor.
         allowed_nets = _allowed_private_networks()
+        # Entries may narrow themselves to specific ports. An invalid port in
+        # the URL raises here and fails closed via the outer handler.
+        port = parsed.port or (443 if scheme == "https" else 80)
 
         # Try to resolve and check IP
         try:
@@ -519,10 +567,13 @@ def is_safe_url(url: str) -> bool:
                 if (isinstance(ip, ipaddress.IPv6Address)
                         and ip.ipv4_mapped is not None):
                     check_ip = ip.ipv4_mapped
-                if any(check_ip in net for net in allowed_nets):
+                if any(
+                    check_ip in net and (ports is None or port in ports)
+                    for net, ports in allowed_nets
+                ):
                     logger.debug(
-                        "Allowing IP in security.allowed_private_networks: %s -> %s",
-                        hostname, ip_str,
+                        "Allowing IP in security.allowed_private_networks: %s -> %s:%d",
+                        hostname, ip_str, port,
                     )
                     continue
                 logger.warning(
