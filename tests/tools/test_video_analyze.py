@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from tools.vision_tools import (
     _detect_video_mime_type,
     _ensure_ytdlp_available,
+    _download_video_via_ytdlp,
     _resolve_video_provider_model,
     _video_to_base64_data_url,
     _handle_video_analyze,
@@ -354,6 +356,29 @@ class TestVideoAnalyzeTool:
 
 
 class TestVideoDependenciesAndRouting:
+    def test_ytdlp_uses_system_ca_bundle(self, tmp_path):
+        """yt-dlp must trust the VM CA store, not its bundled certifi roots."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            template = argv[argv.index("-o") + 1]
+            Path(template.replace("%(ext)s", "mp4")).write_bytes(b"video")
+            result = MagicMock()
+            result.stderr = ""
+            return result
+
+        with patch("subprocess.run", side_effect=fake_run):
+            output = asyncio.get_event_loop().run_until_complete(
+                _download_video_via_ytdlp(
+                    "https://youtu.be/GhSdkmMt4LE", tmp_path
+                )
+            )
+
+        assert output.read_bytes() == b"video"
+        compat_index = captured["argv"].index("--compat-options")
+        assert captured["argv"][compat_index + 1] == "no-certifi"
+
     def test_missing_ytdlp_uses_pinned_lazy_dependency(self):
         real_import = __import__
 

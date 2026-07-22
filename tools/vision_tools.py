@@ -1768,7 +1768,8 @@ async def _download_video_via_ytdlp(url: str, dest_dir: Path) -> Path:
     # Single progressive file (no merge -> no hard ffmpeg dependency), <=480p.
     fmt = "b[height<=480][ext=mp4]/b[ext=mp4]/b[height<=480]/b"
     base = _ytdlp_command() + [
-        "--ignore-config", "-q", "--no-warnings", "--no-playlist",
+        "--ignore-config", "--compat-options", "no-certifi",
+        "-q", "--no-warnings", "--no-playlist",
         # 35M raw keeps the ~1.37x base64 data-URL under _MAX_VIDEO_BASE64_BYTES (50M).
         "-f", fmt, "--max-filesize", "35M",
         "-o", out_tmpl,
