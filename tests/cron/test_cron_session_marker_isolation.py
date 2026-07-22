@@ -62,7 +62,7 @@ def _patch_agent_bootstrap(monkeypatch):
     monkeypatch.setattr(run_agent, "OpenAI", _FakeOpenAI)
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider",
-        lambda requested=None: {
+        lambda requested=None, target_model=None, explicit_base_url=None: {
             "provider": "openai",
             "api_mode": "chat_completions",
             "base_url": "https://api.openai.com/v1",
