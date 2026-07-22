@@ -428,7 +428,7 @@ def apply_wal_with_fallback(
 ) -> str:
     """Set ``journal_mode=WAL`` on ``conn``, falling back to DELETE on failure.
 
-    Returns the journal mode actually set (``"wal"`` or ``"delete"``).
+    Returns the journal mode actually set.
 
     On WAL-incompatible filesystems (NFS, SMB, some FUSE), SQLite raises
     ``OperationalError("locking protocol")`` when setting WAL.  We fall
@@ -444,8 +444,24 @@ def apply_wal_with_fallback(
     Shared by :class:`SessionDB` and ``hermes_cli.kanban_db.connect`` so
     both databases get identical fallback behavior.
 
-    Never downgrades to DELETE if the on-disk DB header reports WAL — see _on_disk_journal_mode.
+    Automatic fallback never downgrades an existing WAL database. An explicit
+    non-WAL configuration is authoritative and must be applied while no other
+    connection is using the database.
     """
+    # Honor an explicit non-WAL mode before probing the current mode.  The
+    # ordering is load-bearing: a database whose header already says WAL must
+    # still be switched when the operator forces DELETE for its backing
+    # filesystem (#68545).
+    configured = resolve_journal_mode()
+    if configured != "wal":
+        row = conn.execute(f"PRAGMA journal_mode={configured.upper()}").fetchone()
+        actual = str(row[0]).strip().lower() if row else None
+        if actual != configured:
+            raise sqlite3.OperationalError(
+                f"could not set journal_mode={configured}; SQLite reported {actual!r}"
+            )
+        return actual
+
     # Read-only probe — no flock, no checkpoint, no WAL/SHM unlink.
     # Skipping the set-pragma prevents WAL-init from unlinking files other connections hold open.
     try:
@@ -456,16 +472,6 @@ def apply_wal_with_fallback(
             return "wal"
     except sqlite3.OperationalError:
         pass
-
-    # #68545: honor user-configured journal_mode (env/config.yaml).
-    # If the user forced DELETE (e.g. for virtiofs/NFS/SMB), don't try WAL.
-    _configured = resolve_journal_mode()
-    if _configured != "wal":
-        try:
-            conn.execute(f"PRAGMA journal_mode={_configured.upper()}")
-        except sqlite3.OperationalError:
-            pass  # mode may not be supported; leave whatever is set
-        return _configured
 
     try:
         conn.execute("PRAGMA journal_mode=WAL")

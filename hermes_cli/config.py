@@ -998,6 +998,12 @@ def _ensure_hermes_home_managed(home: Path):
 
 DEFAULT_CONFIG = {
     "model": "",
+    # SQLite WAL is unsafe on some shared/network backing filesystems.  Keep
+    # WAL as the general default; managed runtimes such as Bolster explicitly
+    # pin DELETE when their state directory is exported through virtiofs.
+    "database": {
+        "journal_mode": "wal",
+    },
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import inspect
-import os
 import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -31,6 +28,18 @@ def test_resolve_journal_mode_env_truncase(monkeypatch):
     assert resolve_journal_mode() == "delete"
 
 
+def test_resolve_journal_mode_config_override(monkeypatch, tmp_path):
+    from hermes_state import resolve_journal_mode
+
+    monkeypatch.delenv("HERMES_JOURNAL_MODE", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "database:\n  journal_mode: delete\n",
+        encoding="utf-8",
+    )
+    assert resolve_journal_mode() == "delete"
+
+
 def test_resolve_journal_mode_invalid_falls_back_to_wal(monkeypatch):
     from hermes_state import resolve_journal_mode
 
@@ -52,6 +61,35 @@ def test_apply_wal_with_fallback_honors_delete_mode(monkeypatch, tmp_path):
     conn.close()
 
 
+def test_apply_wal_with_fallback_switches_existing_wal_to_delete(monkeypatch, tmp_path):
+    """A forced mode is authoritative even when the DB header already says WAL."""
+    from hermes_state import apply_wal_with_fallback
+
+    db = tmp_path / "existing-wal.db"
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    conn.close()
+
+    monkeypatch.setenv("HERMES_JOURNAL_MODE", "delete")
+    conn = sqlite3.connect(str(db))
+    assert apply_wal_with_fallback(conn, db_label="existing-wal.db") == "delete"
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    conn.close()
+
+
+def test_apply_wal_with_fallback_does_not_hide_forced_mode_failure(monkeypatch):
+    """Never claim DELETE is active when SQLite rejected the transition."""
+    from hermes_state import apply_wal_with_fallback
+
+    class RejectingConnection:
+        def execute(self, _sql):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setenv("HERMES_JOURNAL_MODE", "delete")
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        apply_wal_with_fallback(RejectingConnection(), db_label="locked.db")
+
+
 def test_apply_wal_with_fallback_defaults_to_wal(monkeypatch, tmp_path):
     """Without override, apply_wal_with_fallback still sets WAL."""
     from hermes_state import apply_wal_with_fallback
@@ -64,15 +102,41 @@ def test_apply_wal_with_fallback_defaults_to_wal(monkeypatch, tmp_path):
     conn.close()
 
 
-def test_direct_setters_use_apply_wal_with_fallback():
-    """All 5 bypass openers must route through apply_wal_with_fallback (#68545)."""
-    for fpath in [
-        "tools/async_delegation.py",
-        "gateway/delivery_ledger.py",
-        "agent/verification_evidence.py",
-        "cron/executions.py",
-        "plugins/platforms/discord/recovery.py",
-    ]:
-        src = Path(fpath).read_text(encoding="utf-8")
-        assert "apply_wal_with_fallback" in src, f"{fpath} must use apply_wal_with_fallback"
-        assert 'PRAGMA journal_mode=WAL"' not in src, f"{fpath} must not set WAL directly"
+def test_direct_db_openers_honor_forced_delete(monkeypatch, tmp_path):
+    """Exercise every former direct-WAL opener against real SQLite files."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_JOURNAL_MODE", "delete")
+
+    from agent import verification_evidence
+    from cron import executions
+    from gateway import delivery_ledger
+    from plugins.platforms.discord.recovery import DiscordRecoveryStore
+    from tools import async_delegation
+
+    connections = [
+        async_delegation._connect(),
+        delivery_ledger._connect(),
+        verification_evidence._connect(),
+    ]
+    try:
+        assert [
+            conn.execute("PRAGMA journal_mode").fetchone()[0] for conn in connections
+        ] == ["delete", "delete", "delete"]
+    finally:
+        for conn in connections:
+            conn.close()
+
+    monkeypatch.setattr(
+        executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db"
+    )
+    conn = executions._connect()
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    finally:
+        conn.close()
+
+    store = DiscordRecoveryStore(tmp_path)
+    assert (
+        store.call(lambda conn: conn.execute("PRAGMA journal_mode").fetchone()[0])
+        == "delete"
+    )
