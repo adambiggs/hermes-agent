@@ -11,6 +11,7 @@ from tools.vision_tools import (
     _ensure_ytdlp_available,
     _download_video_via_ytdlp,
     _resolve_video_provider_model,
+    _ytdlp_js_runtime_args,
     _video_to_base64_data_url,
     _handle_video_analyze,
     _MAX_VIDEO_BASE64_BYTES,
@@ -356,6 +357,15 @@ class TestVideoAnalyzeTool:
 
 
 class TestVideoDependenciesAndRouting:
+    def test_ytdlp_enables_installed_node_runtime(self):
+        def which(executable):
+            return "/opt/node/bin/node" if executable == "node" else None
+
+        with patch("shutil.which", side_effect=which):
+            assert _ytdlp_js_runtime_args() == [
+                "--js-runtimes", "node:/opt/node/bin/node"
+            ]
+
     def test_ytdlp_uses_system_ca_bundle(self, tmp_path):
         """yt-dlp must trust the VM CA store, not its bundled certifi roots."""
         captured = {}
