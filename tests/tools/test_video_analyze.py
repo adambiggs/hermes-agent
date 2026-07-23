@@ -2,7 +2,11 @@
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -11,6 +15,7 @@ from tools.vision_tools import (
     _ensure_ytdlp_available,
     _download_video_via_ytdlp,
     _resolve_video_provider_model,
+    _ytdlp_command,
     _ytdlp_js_runtime_args,
     _video_to_base64_data_url,
     _handle_video_analyze,
@@ -357,6 +362,40 @@ class TestVideoAnalyzeTool:
 
 
 class TestVideoDependenciesAndRouting:
+    def test_ytdlp_child_can_import_from_lazy_target(self, tmp_path, monkeypatch):
+        target = tmp_path / "lazy-packages"
+        package = target / "yt_dlp"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "__main__.py").write_text(
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['YTDLP_TEST_RESULT']).write_text("
+            "json.dumps(sys.argv[1:]), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+
+        fake_module = ModuleType("yt_dlp")
+        fake_module.__file__ = str(package / "__init__.py")
+        monkeypatch.setitem(sys.modules, "yt_dlp", fake_module)
+
+        result_path = tmp_path / "result.json"
+        child_env = os.environ.copy()
+        child_env.pop("PYTHONPATH", None)
+        child_env["YTDLP_TEST_RESULT"] = str(result_path)
+        subprocess.run(
+            [*_ytdlp_command(), "--probe", "value"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+        )
+
+        assert json.loads(result_path.read_text(encoding="utf-8")) == [
+            "--probe", "value"
+        ]
+
     def test_ytdlp_enables_installed_node_runtime(self):
         def which(executable):
             return "/opt/node/bin/node" if executable == "node" else None
@@ -378,7 +417,8 @@ class TestVideoDependenciesAndRouting:
             result.stderr = ""
             return result
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("tools.vision_tools._ytdlp_command", return_value=["yt-dlp"]), \
+             patch("subprocess.run", side_effect=fake_run):
             output = asyncio.get_event_loop().run_until_complete(
                 _download_video_via_ytdlp(
                     "https://youtu.be/GhSdkmMt4LE", tmp_path
