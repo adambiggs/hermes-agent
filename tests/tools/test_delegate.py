@@ -32,6 +32,7 @@ from tools.delegate_tool import (
     _build_child_system_prompt,
     _extract_output_tail,
     _strip_blocked_tools,
+    _resolve_workspace_hint,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
     _inherit_parent_base_url,
@@ -154,6 +155,47 @@ class TestChildSystemPrompt(unittest.TestCase):
     def test_empty_context_ignored(self):
         prompt = _build_child_system_prompt("Do something", "  ")
         self.assertNotIn("CONTEXT", prompt)
+
+
+class TestWorkspaceHint(unittest.TestCase):
+    def test_container_uses_tool_visible_cwd_instead_of_gateway_path(self):
+        """A gateway-only TERMINAL_CWD must not be sent to Docker workers."""
+        parent = types.SimpleNamespace()
+        terminal_config = {
+            "env_type": "docker",
+            "cwd": "/workspace",
+            "host_cwd": "/mnt/bolster-state/hermes/workspace",
+        }
+        with patch.dict(
+            os.environ,
+            {"TERMINAL_CWD": "/mnt/bolster-state/hermes/workspace"},
+        ), patch(
+            "tools.terminal_tool._get_env_config",
+            return_value=terminal_config,
+        ):
+            self.assertEqual(_resolve_workspace_hint(parent), "/workspace")
+
+    def test_local_backend_keeps_existing_directory_discovery(self):
+        parent = types.SimpleNamespace()
+        with patch.dict(os.environ, {"TERMINAL_CWD": os.getcwd()}), patch(
+            "tools.terminal_tool._get_env_config",
+            return_value={"env_type": "local", "cwd": os.getcwd()},
+        ):
+            self.assertEqual(_resolve_workspace_hint(parent), os.getcwd())
+
+    def test_broken_container_config_omits_gateway_path(self):
+        parent = types.SimpleNamespace()
+        with patch.dict(
+            os.environ,
+            {
+                "TERMINAL_ENV": "docker",
+                "TERMINAL_CWD": os.getcwd(),
+            },
+        ), patch(
+            "tools.terminal_tool._get_env_config",
+            side_effect=ValueError("invalid container config"),
+        ):
+            self.assertIsNone(_resolve_workspace_hint(parent))
 
 
 class TestStripBlockedTools(unittest.TestCase):

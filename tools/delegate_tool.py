@@ -738,12 +738,42 @@ def _build_child_system_prompt(
 
 
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
-    """Best-effort local workspace hint for child prompts.
+    """Best-effort tool-visible workspace hint for child prompts.
 
-    We only inject a path when we have a concrete absolute directory. This avoids
-    teaching subagents a fake container path while still helping them avoid
-    guessing `/workspace/...` for local repo tasks.
+    Container-backed tools operate in a different filesystem namespace from the
+    gateway process.  In that case, use terminal_tool's already-sanitized cwd
+    (for example ``/workspace``) instead of leaking the host-side
+    ``TERMINAL_CWD`` into the child's prompt.  For local tools, retain the
+    existing requirement that the path is an absolute directory visible to the
+    current process.
     """
+    from tools.terminal_tool import (
+        _CONTAINER_BACKENDS,
+        _get_env_config,
+        _is_unusable_container_cwd,
+    )
+
+    try:
+        terminal_config = _get_env_config()
+        if terminal_config.get("env_type") in _CONTAINER_BACKENDS:
+            container_cwd = terminal_config.get("cwd")
+            if (
+                isinstance(container_cwd, str)
+                and os.path.isabs(container_cwd)
+                and not _is_unusable_container_cwd(container_cwd)
+            ):
+                return os.path.normpath(container_cwd)
+            return None
+    except Exception:
+        # Workspace hints are advisory.  If terminal configuration cannot be
+        # loaded, omit the hint for a configured container backend rather than
+        # leak its host-side cwd. Local backends retain historical discovery.
+        logger.debug(
+            "Could not resolve container-visible child workspace", exc_info=True
+        )
+        if os.getenv("TERMINAL_ENV", "").strip().lower() in _CONTAINER_BACKENDS:
+            return None
+
     candidates = [
         os.getenv("TERMINAL_CWD"),
         getattr(
