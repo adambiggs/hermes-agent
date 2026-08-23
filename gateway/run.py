@@ -10065,6 +10065,48 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    #: Said once, to the first person who ever messages this instance, when the
+    #: operator has not written their own. Deliberately claims no capability: what
+    #: is connected differs per install, and a welcome that promises a calendar
+    #: this instance does not have is worse than no welcome.
+    DEFAULT_START_MESSAGE = (
+        "Hi \u2014 I'm Hermes, your assistant on this private instance.\n\n"
+        "Just talk to me normally: ask a question, forward something you want "
+        "dealt with, or tell me what you need. If I get something wrong, say so "
+        "and I'll correct it.\n\n"
+        "Send /help to see what I can do here."
+    )
+
+    async def _first_contact_welcome(self) -> str:
+        """Return a welcome when nobody has ever used this instance, else "".
+
+        Telegram fires ``/start`` on bot launch and on every deep link, so the
+        gateway ignores it: answering would dump text over a running conversation
+        and interrupt the agent. That reasoning holds for an established user and
+        inverts for a new one, whose very first tap is answered with silence.
+
+        The gate is the whole session store, not this user's sessions, so this can
+        fire at most once per install and can never land on top of somebody's
+        conversation.
+
+        The reply is static by construction. A first contact must not be able to
+        fail, hang behind a model call, or introduce a capability this deployment
+        does not have; ``onboarding.start_message`` lets an operator replace it,
+        and an empty string in that key restores the old silence.
+        """
+        try:
+            if await self.async_session_store.has_any_sessions():
+                return ""
+            configured = (self.config.get("onboarding", {}) or {}).get(
+                "start_message", None
+            )
+        except Exception as err:  # never let a welcome break command dispatch
+            logger.debug("First-contact welcome check failed: %s", err)
+            return ""
+        if configured is None:
+            return self.DEFAULT_START_MESSAGE
+        return str(configured).strip()
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -10970,6 +11012,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return await self._handle_help_command(event)
 
         if canonical == "start":
+            welcome = await self._first_contact_welcome()
+            if welcome:
+                logger.info("Answering /start for first contact %s", _quick_key)
+                return welcome
             logger.info("Ignoring /start platform ping for session %s", _quick_key)
             return ""
 
