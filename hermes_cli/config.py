@@ -2786,6 +2786,12 @@ DEFAULT_CONFIG = {
         # egress proxy that shares a host with other internal services). The
         # cloud-metadata floor is checked first and can never be allowlisted.
         "allowed_private_networks": [],
+        # Exact hostnames allowed to resolve into private/CGNAT space over
+        # HTTPS — e.g. a VPN/tailnet-only internal surface. Deployment-specific
+        # names belong here, not in source. Subdomains are not covered and the
+        # cloud-metadata floor still applies. Env override:
+        # HERMES_TRUSTED_PRIVATE_IP_HOSTS (comma- or space-separated).
+        "trusted_private_ip_hosts": [],
         "redact_secrets": True,
         "tirith_enabled": True,
         "tirith_path": "tirith",

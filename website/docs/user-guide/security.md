@@ -639,6 +639,22 @@ Each entry is a CIDR, optionally suffixed with `:<port>[,<port>…]`. The port f
 
 Your real LAN, loopback, and CGNAT stay blocked unless you list them. Cloud metadata is checked *before* this allowlist and can never be exempted, even by listing `169.254.0.0/16`. Invalid entries are logged and skipped rather than failing startup.
 
+#### Allowing a specific internal hostname
+
+When the thing you trust is a *name* rather than a range — a VPN or tailnet-only internal surface whose address is assigned by the VPN and may change — allowlist the hostname instead:
+
+```yaml
+security:
+  trusted_private_ip_hosts:
+    - review-surface.example.ts.net
+```
+
+Entries are exact hostnames, matched case-insensitively; subdomains are **not** covered, so listing `example.ts.net` does not admit `evil.example.ts.net`. Requests to a listed host must use HTTPS — plain `http://` stays blocked. The cloud-metadata floor is still checked first, so a listed host that resolves to `169.254.169.254` is blocked anyway, and DNS failures still fail closed.
+
+`HERMES_TRUSTED_PRIVATE_IP_HOSTS` overrides the config list for a single process; give it a comma- or space-separated list.
+
+Because a VPN hostname identifies your machine and network, keep it in your own config or environment — do not commit it to a shared or public repository.
+
 ### Tirith Pre-Exec Security Scanning
 
 Hermes integrates [tirith](https://github.com/sheeki03/tirith) for content-level command scanning before execution. Tirith detects threats that pattern matching alone misses:

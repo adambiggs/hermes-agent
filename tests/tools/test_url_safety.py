@@ -272,23 +272,94 @@ class TestIsSafeUrl:
         with patch("socket.getaddrinfo", side_effect=socket.gaierror("Name resolution failed")):
             assert is_safe_url("https://multimedia.nt.qq.com.cn/download?id=123") is False
 
-    def test_configured_tailnet_app_hostname_allowed_with_cgnat_ip(self):
-        with patch("socket.getaddrinfo", return_value=[
-            (2, 1, 6, "", ("100.100.100.100", 0)),
-        ]):
-            assert is_safe_url("https://review-surface.example.test/apps/envelop/") is True
+    # -- security.trusted_private_ip_hosts -------------------------------
+    # A deployment's own private-resolving host (a VPN/tailnet review surface)
+    # is supplied by config, never hardcoded here. TRUSTED_HOST below is a
+    # fixture value with no relationship to any real deployment.
 
-    def test_configured_tailnet_app_hostname_exception_is_exact_match(self):
-        with patch("socket.getaddrinfo", return_value=[
-            (2, 1, 6, "", ("100.100.100.100", 0)),
-        ]):
-            assert is_safe_url("https://evil.review-surface.example.test/apps/") is False
+    TRUSTED_HOST = "review-surface.example.test"
 
-    def test_configured_tailnet_app_hostname_exception_requires_https(self):
+    @pytest.fixture
+    def trusted_hosts(self, monkeypatch):
+        """Supply security.trusted_private_ip_hosts and clear the cache around a test."""
+        def configure(hosts, *, via_env=False):
+            if via_env:
+                monkeypatch.setenv("HERMES_TRUSTED_PRIVATE_IP_HOSTS", hosts)
+            else:
+                monkeypatch.delenv("HERMES_TRUSTED_PRIVATE_IP_HOSTS", raising=False)
+                monkeypatch.setattr(
+                    "hermes_cli.config.read_raw_config",
+                    lambda: {"security": {"trusted_private_ip_hosts": hosts}},
+                    raising=False,
+                )
+            _reset_allow_private_cache()
+
+        monkeypatch.delenv("HERMES_TRUSTED_PRIVATE_IP_HOSTS", raising=False)
+        monkeypatch.delenv("HERMES_ALLOW_PRIVATE_URLS", raising=False)
+        _reset_allow_private_cache()
+        yield configure
+        _reset_allow_private_cache()
+
+    def test_configured_host_allowed_with_cgnat_ip(self, trusted_hosts):
+        trusted_hosts([self.TRUSTED_HOST])
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("100.100.100.100", 0)),
         ]):
-            assert is_safe_url("http://review-surface.example.test/apps/envelop/") is False
+            assert is_safe_url(f"https://{self.TRUSTED_HOST}/apps/envelop/") is True
+
+    def test_configured_host_accepts_bare_string(self, trusted_hosts):
+        trusted_hosts(self.TRUSTED_HOST)
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url(f"https://{self.TRUSTED_HOST}/apps/envelop/") is True
+
+    def test_configured_host_via_env_var(self, trusted_hosts):
+        trusted_hosts(f"other.example.test,{self.TRUSTED_HOST}", via_env=True)
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url(f"https://{self.TRUSTED_HOST}/apps/envelop/") is True
+
+    def test_configured_host_is_normalized(self, trusted_hosts):
+        trusted_hosts([f"  {self.TRUSTED_HOST.upper()}.  "])
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url(f"https://{self.TRUSTED_HOST}/apps/envelop/") is True
+
+    def test_unconfigured_host_stays_blocked(self, trusted_hosts):
+        trusted_hosts([])
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url(f"https://{self.TRUSTED_HOST}/apps/envelop/") is False
+
+    def test_configured_host_exception_is_exact_match(self, trusted_hosts):
+        trusted_hosts([self.TRUSTED_HOST])
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url(f"https://evil.{self.TRUSTED_HOST}/apps/") is False
+
+    def test_configured_host_exception_requires_https(self, trusted_hosts):
+        trusted_hosts([self.TRUSTED_HOST])
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("100.100.100.100", 0)),
+        ]):
+            assert is_safe_url(f"http://{self.TRUSTED_HOST}/apps/envelop/") is False
+
+    def test_configured_host_cannot_reach_metadata_floor(self, trusted_hosts):
+        trusted_hosts([self.TRUSTED_HOST])
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("169.254.169.254", 0)),
+        ]):
+            assert is_safe_url(f"https://{self.TRUSTED_HOST}/latest/meta-data/") is False
+
+    def test_configured_host_dns_failure_still_blocked(self, trusted_hosts):
+        trusted_hosts([self.TRUSTED_HOST])
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror("Name resolution failed")):
+            assert is_safe_url(f"https://{self.TRUSTED_HOST}/apps/envelop/") is False
 
 
 class TestAsyncIsSafeUrl:
