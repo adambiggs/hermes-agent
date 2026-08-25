@@ -190,10 +190,6 @@ _ALWAYS_BLOCKED_NETWORKS = (
 # to 198.18.0.0/15 behind local proxy/benchmark infrastructure.
 _TRUSTED_PRIVATE_IP_HOSTS = frozenset({
     "multimedia.nt.qq.com.cn",
-    # An owner-authenticated, tailnet-only mini-app review surface.  Keep
-    # this exact and HTTPS-only via _allows_private_ip_resolution(); granting
-    # all private URLs would unnecessarily weaken the SSRF boundary.
-    "review-surface.example.test",
 })
 
 # 100.64.0.0/10 (CGNAT / Shared Address Space, RFC 6598) is NOT covered by
@@ -265,10 +261,13 @@ def _reset_allow_private_cache() -> None:
     """Reset the cached toggle — only for tests."""
     global _allow_private_resolved, _cached_allow_private
     global _allowed_networks_resolved, _cached_allowed_networks
+    global _trusted_hosts_resolved, _cached_trusted_hosts
     _allow_private_resolved = False
     _cached_allow_private = False
     _allowed_networks_resolved = False
     _cached_allowed_networks = ()
+    _trusted_hosts_resolved = False
+    _cached_trusted_hosts = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +364,77 @@ def _allowed_private_networks() -> tuple:
 
     _cached_allowed_networks = tuple(nets)
     return _cached_allowed_networks
+
+
+# ---------------------------------------------------------------------------
+# Config-driven allowlist of specific private-resolving hostnames
+# ---------------------------------------------------------------------------
+# Deployment-specific hosts (a VPN/tailnet name, an internal review surface)
+# belong to the operator's environment, not to this source tree — hardcoding
+# one publishes a live identifier to everyone who can read the repo. Entries
+# are exact hostnames, matched case-insensitively, and still require HTTPS via
+# _allows_private_ip_resolution(). The always-blocked metadata floor and
+# _BLOCKED_HOSTNAMES are checked first and CANNOT be allowlisted here.
+_trusted_hosts_resolved = False
+_cached_trusted_hosts: frozenset = frozenset()
+
+
+def _normalize_trusted_host(item: Any) -> Optional[str]:
+    """Normalize one allowlist entry to the form ``is_safe_url`` compares against."""
+    host = str(item).strip().lower().rstrip(".")
+    return host or None
+
+
+def _trusted_private_ip_hosts() -> frozenset:
+    """Return every hostname allowed to resolve to a private/benchmark IP.
+
+    The built-in ``_TRUSTED_PRIVATE_IP_HOSTS`` baseline plus operator-supplied
+    entries, read (in priority order) from:
+
+    1. ``HERMES_TRUSTED_PRIVATE_IP_HOSTS`` env var (comma- or space-separated)
+    2. ``security.trusted_private_ip_hosts`` in config.yaml (string or list)
+
+    The env var, when set to a non-empty value, replaces the config list rather
+    than merging with it, so a deployment can override a configured file.
+    Result is cached for the process lifetime.
+    """
+    global _trusted_hosts_resolved, _cached_trusted_hosts
+    if _trusted_hosts_resolved:
+        return _cached_trusted_hosts
+
+    _trusted_hosts_resolved = True
+    raw: list = []
+
+    env_val = os.getenv("HERMES_TRUSTED_PRIVATE_IP_HOSTS", "").strip()
+    if env_val:
+        raw = env_val.replace(",", " ").split()
+    else:
+        try:
+            from hermes_cli.config import read_raw_config
+            cfg = read_raw_config()
+            sec = cfg.get("security", {})
+            if isinstance(sec, dict):
+                configured = sec.get("trusted_private_ip_hosts") or []
+                if isinstance(configured, str):
+                    configured = [configured]
+                if isinstance(configured, (list, tuple)):
+                    raw = list(configured)
+        except Exception:
+            # Config unavailable (tests, early import) — baseline only
+            pass
+
+    hosts = set(_TRUSTED_PRIVATE_IP_HOSTS)
+    for item in raw:
+        host = _normalize_trusted_host(item)
+        if host is None:
+            logger.warning(
+                "Ignoring empty security.trusted_private_ip_hosts entry: %r", item
+            )
+            continue
+        hosts.add(host)
+
+    _cached_trusted_hosts = frozenset(hosts)
+    return _cached_trusted_hosts
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -490,7 +560,7 @@ def is_always_blocked_url(url: str) -> bool:
 
 def _allows_private_ip_resolution(hostname: str, scheme: str) -> bool:
     """Return True when a trusted HTTPS hostname may bypass IP-class blocking."""
-    return scheme == "https" and hostname in _TRUSTED_PRIVATE_IP_HOSTS
+    return scheme == "https" and hostname in _trusted_private_ip_hosts()
 
 
 def is_safe_url(url: str) -> bool:
