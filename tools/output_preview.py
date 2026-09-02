@@ -54,8 +54,7 @@ def decode_output_preview_segments(url: str) -> Optional[list[str]]:
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("file preview URL has invalid path encoding") from exc
     if "\\" in decoded_path or any(
-        character.isspace() or unicodedata.category(character) == "Cc"
-        for character in decoded_path
+        unicodedata.category(character) == "Cc" for character in decoded_path
     ):
         raise ValueError("file preview URL has an ambiguous path")
     parts = decoded_path.split("/")

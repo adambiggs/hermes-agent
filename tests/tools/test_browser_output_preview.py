@@ -64,6 +64,12 @@ def test_decode_ignores_non_file_urls():
     assert output_preview.decode_output_preview_segments("https://example.com") is None
 
 
+def test_decode_accepts_percent_encoded_filename_space():
+    assert output_preview.decode_output_preview_segments(
+        "file:///output/apps/demo/my%20file.html"
+    ) == ["apps", "demo", "my file.html"]
+
+
 @pytest.mark.parametrize(
     "url",
     [
