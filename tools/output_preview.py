@@ -11,6 +11,7 @@ import os
 import shutil
 import stat
 import threading
+import unicodedata
 import urllib.parse
 from pathlib import Path
 from typing import Optional
@@ -41,15 +42,21 @@ def decode_output_preview_segments(url: str) -> Optional[list[str]]:
         raise ValueError("file preview URL has an ambiguous scheme")
     if not url.startswith("file:///output/"):
         raise ValueError("file preview URL is not canonical file:///output/")
-    if any(character.isspace() or ord(character) < 0x20 for character in url):
+    if any(
+        character.isspace() or unicodedata.category(character) == "Cc"
+        for character in url
+    ):
         raise ValueError("file preview URL contains raw whitespace or controls")
-    if parsed.netloc or parsed.query or parsed.fragment:
+    if parsed.netloc or "?" in url or "#" in url:
         raise ValueError("file preview URL has authority, query, or fragment")
     try:
         decoded_path = urllib.parse.unquote_to_bytes(parsed.path).decode("utf-8")
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError("file preview URL has invalid path encoding") from exc
-    if "\x00" in decoded_path or "\\" in decoded_path:
+    if "\\" in decoded_path or any(
+        character.isspace() or unicodedata.category(character) == "Cc"
+        for character in decoded_path
+    ):
         raise ValueError("file preview URL has an ambiguous path")
     parts = decoded_path.split("/")
     if (
