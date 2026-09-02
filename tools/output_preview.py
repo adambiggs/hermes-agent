@@ -30,11 +30,19 @@ def decode_output_preview_segments(url: str) -> Optional[list[str]]:
     rejected before any filesystem access. Symlinks are rejected separately by
     descriptor-relative O_NOFOLLOW opens in ``_OutputPreviewServer.open_file``.
     """
+    # Classify a possible file URL from the caller's raw text before the
+    # browser's generic HTTP URL normalizer can trim or repair it. Avoid
+    # parsing unrelated malformed HTTP URLs here: urlsplit itself can raise
+    # for those, but they belong to the normal browser safety path.
+    if not url.lstrip().lower().startswith("file:"):
+        return None
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme.lower() != "file":
-        return None
+        raise ValueError("file preview URL has an ambiguous scheme")
     if not url.startswith("file:///output/"):
         raise ValueError("file preview URL is not canonical file:///output/")
+    if any(character.isspace() or ord(character) < 0x20 for character in url):
+        raise ValueError("file preview URL contains raw whitespace or controls")
     if parsed.netloc or parsed.query or parsed.fragment:
         raise ValueError("file preview URL has authority, query, or fragment")
     try:

@@ -44,6 +44,9 @@ def output_root(tmp_path, monkeypatch):
         "file:///output/apps/demo/index.html#fragment",
         "file://localhost/output/apps/demo/index.html",
         "file:///output/apps/demo\\index.html",
+        " file:///output/apps/demo/index.html",
+        "file:///output/apps/demo/index.html ",
+        "file:// /output/apps/demo/index.html",
     ],
 )
 def test_decode_rejects_every_noncanonical_file_url(url):
@@ -53,6 +56,20 @@ def test_decode_rejects_every_noncanonical_file_url(url):
 
 def test_decode_ignores_non_file_urls():
     assert output_preview.decode_output_preview_segments("https://example.com") is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        " file:///output/apps/demo/index.html",
+        "file:///output/apps/demo/index.html ",
+        "file:// /output/apps/demo/index.html",
+    ],
+)
+def test_browser_rejects_ambiguous_file_input_before_url_normalization(url):
+    result = json.loads(browser_tool.browser_navigate(url, task_id="task"))
+    assert result["success"] is False
+    assert "local file" in result["error"] or "file:///output/" in result["error"]
 
 
 def test_loopback_server_serves_main_file_and_relative_asset(output_root):
@@ -202,5 +219,67 @@ def test_unconfined_current_file_is_blanked_before_content_return(monkeypatch):
     assert blocked is not None
     assert json.loads(blocked)["success"] is False
     assert calls[-1] == ("task", "open", ["about:blank"])
+    with browser_tool._output_preview_lock:
+        browser_tool._output_preview_session_keys.discard("task")
+
+
+@pytest.mark.parametrize("probe_raises", [False, True])
+def test_unavailable_current_url_probe_blanks_and_blocks(monkeypatch, probe_raises):
+    calls = []
+    with browser_tool._output_preview_lock:
+        browser_tool._output_preview_session_keys.add("task")
+
+    def fake_run(task_id, command, args=None, **_kwargs):
+        calls.append((task_id, command, args or []))
+        if command == "eval":
+            if probe_raises:
+                raise RuntimeError("synthetic probe failure")
+            return {"success": False, "error": "synthetic probe failure"}
+        if command == "open":
+            return {"success": True}
+        raise AssertionError(command)
+
+    monkeypatch.setattr(browser_tool, "_run_browser_command", fake_run)
+
+    blocked = browser_tool._blocked_local_file_page("task", "return content")
+
+    assert blocked is not None
+    payload = json.loads(blocked)
+    assert payload["success"] is False
+    assert "could not verify" in payload["error"]
+    assert calls[-1] == ("task", "open", ["about:blank"])
+    with browser_tool._output_preview_lock:
+        browser_tool._output_preview_session_keys.discard("task")
+
+
+@pytest.mark.parametrize("probe_raises", [False, True])
+def test_snapshot_withholds_content_when_current_url_probe_fails(
+    monkeypatch, probe_raises
+):
+    with browser_tool._output_preview_lock:
+        browser_tool._output_preview_session_keys.add("task")
+    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+
+    def fake_run(_task_id, command, _args=None, **_kwargs):
+        if command == "snapshot":
+            return {
+                "success": True,
+                "data": {"snapshot": "FILE PAGE CONTENT", "refs": {}},
+            }
+        if command == "eval":
+            if probe_raises:
+                raise RuntimeError("synthetic probe failure")
+            return {"success": False, "error": "synthetic probe failure"}
+        if command == "open":
+            return {"success": True}
+        raise AssertionError(command)
+
+    monkeypatch.setattr(browser_tool, "_run_browser_command", fake_run)
+
+    result = json.loads(browser_tool.browser_snapshot(task_id="task"))
+
+    assert result["success"] is False
+    assert "FILE PAGE CONTENT" not in json.dumps(result)
+    assert "could not verify" in result["error"]
     with browser_tool._output_preview_lock:
         browser_tool._output_preview_session_keys.discard("task")

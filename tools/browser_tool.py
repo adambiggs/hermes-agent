@@ -2830,15 +2830,9 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "error": "Blocked: URL contains what appears to be an API key or token. "
                      "Secrets must not be sent in URLs.",
         })
-    url = _normalize_url_for_request(url)
-    normalized_decoded = urllib.parse.unquote(url)
-    if _PREFIX_RE.search(url) or _PREFIX_RE.search(normalized_decoded):
-        return json.dumps({
-            "success": False,
-            "error": "Blocked: URL contains what appears to be an API key or token. "
-                     "Secrets must not be sent in URLs.",
-        })
-
+    # File URLs must be classified from the literal caller input. The generic
+    # HTTP normalizer intentionally repairs whitespace, which would otherwise
+    # turn an ambiguous input into an accepted local-file preview.
     try:
         output_preview_url = _output_preview_url(url)
     except ValueError:
@@ -2850,6 +2844,25 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 "fragments, traversal, and symlinks are not allowed."
             ),
         })
+
+    if output_preview_url is None:
+        url = _normalize_url_for_request(url)
+        normalized_decoded = urllib.parse.unquote(url)
+        if _PREFIX_RE.search(url) or _PREFIX_RE.search(normalized_decoded):
+            return json.dumps({
+                "success": False,
+                "error": "Blocked: URL contains what appears to be an API key or token. "
+                         "Secrets must not be sent in URLs.",
+            })
+        try:
+            normalized_scheme = urllib.parse.urlsplit(url).scheme.lower()
+        except ValueError:
+            normalized_scheme = ""
+        if normalized_scheme == "file":
+            return json.dumps({
+                "success": False,
+                "error": "Blocked: non-canonical local file URL",
+            })
 
     if output_preview_url and _is_camofox_mode():
         return json.dumps({
@@ -3598,37 +3611,52 @@ def _current_page_private_url(effective_task_id: str) -> Optional[str]:
     return None
 
 
-def _current_page_file_url(effective_task_id: str) -> Optional[str]:
-    """Return the current page URL when Chromium reached any file:// page."""
+def _probe_current_page_file_url(
+    effective_task_id: str,
+) -> tuple[bool, Optional[str]]:
+    """Return ``(probe_succeeded, file_url)`` for the current Chromium page."""
     try:
         url_result = _run_browser_command(
             effective_task_id, "eval", ["window.location.href"],
             timeout=5, _engine_override="auto",
         )
-        if url_result.get("success"):
-            current_url = (
-                url_result.get("data", {}).get("result", "")
-                .strip().strip('"').strip("'")
-            )
-            if urllib.parse.urlsplit(current_url).scheme.lower() == "file":
-                return current_url
+        if not url_result.get("success"):
+            return False, None
+        raw_url = url_result.get("data", {}).get("result")
+        if not isinstance(raw_url, str):
+            return False, None
+        current_url = raw_url.strip().strip('"').strip("'")
+        if not current_url:
+            return False, None
+        if urllib.parse.urlsplit(current_url).scheme.lower() == "file":
+            return True, current_url
+        return True, None
     except Exception as exc:
-        logger.debug("_current_page_file_url: probe failed (%s)", exc)
-    return None
+        logger.debug("_probe_current_page_file_url: probe failed (%s)", exc)
+        return False, None
 
 
 def _blocked_local_file_page(effective_task_id: str, action: str) -> Optional[str]:
-    """Blank and reject a file:// page reached outside the preview proxy."""
+    """Fail closed if a preview session is on file:// or cannot be verified."""
     with _output_preview_lock:
         if effective_task_id not in _output_preview_session_keys:
             return None
-    if not _current_page_file_url(effective_task_id):
+    probe_succeeded, file_url = _probe_current_page_file_url(effective_task_id)
+    if probe_succeeded and file_url is None:
         return None
-    _run_browser_command(effective_task_id, "open", ["about:blank"], timeout=10)
+    try:
+        _run_browser_command(effective_task_id, "open", ["about:blank"], timeout=10)
+    except Exception as exc:
+        logger.debug("_blocked_local_file_page: blanking failed (%s)", exc)
+    reason = (
+        "browser reached an unconfined local file"
+        if file_url is not None
+        else "browser could not verify the current confined preview page"
+    )
     return json.dumps({
         "success": False,
         "error": (
-            "Blocked: browser reached an unconfined local file; refusing to "
+            f"Blocked: {reason}; refusing to "
             f"{action}. Local previews must start beneath file:///output/."
         ),
     }, ensure_ascii=False)
