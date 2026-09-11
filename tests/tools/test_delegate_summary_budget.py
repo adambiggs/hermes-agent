@@ -13,6 +13,7 @@ import tempfile
 import pytest
 
 import tools.delegate_tool as dt
+from tools.credential_files import from_agent_visible_cache_path
 
 
 class _FakeCompressor:
@@ -67,6 +68,28 @@ def test_batch_overflow_trimmed_and_spilled_losslessly(monkeypatch):
             assert "offset=" in r["summary"]
             # Spilled into the delegation cache (mounted into remote backends).
             assert os.path.join("cache", "delegation") in path
+
+
+def test_docker_summary_path_is_agent_visible(monkeypatch, tmp_path):
+    host_home = tmp_path / "host-hermes"
+    monkeypatch.setenv("HERMES_HOME", str(host_home))
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    big = "HEAD_MARKER\n" + ("X" * 50_000) + "\nTAIL_MARKER"
+    results = [{"task_index": 0, "summary": big, "status": "completed"}]
+
+    dt._apply_summary_budget(
+        results,
+        _FakeParent(context_length=131_000, used_tokens=120_000, max_tokens=8_000),
+    )
+
+    reported_path = results[0]["summary_full_path"]
+    assert reported_path.startswith("/root/.hermes/cache/delegation/")
+    assert f'path="{reported_path}"' in results[0]["summary"]
+
+    host_path = from_agent_visible_cache_path(reported_path)
+    assert os.path.exists(host_path)
+    with open(host_path, encoding="utf-8") as fh:
+        assert fh.read() == big
 
 
 def test_dynamic_budget_shrinks_as_batch_grows():

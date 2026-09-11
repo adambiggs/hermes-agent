@@ -1810,7 +1810,7 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
 def _trim_summary_with_footer(
     summary: str, cap: int, task_index: int
 ) -> tuple[str, Optional[str]]:
-    """Return (model_text, spill_path) for one over-budget summary.
+    """Return (model_text, agent-visible spill path) for one over-budget summary.
 
     Mirrors web_extract's ``_truncate_with_footer``: keep a head+tail window
     (~75% head / ~25% tail, snapped to line boundaries) so the subagent's
@@ -1834,7 +1834,12 @@ def _trim_summary_with_footer(
     if 0 <= nl < tail_budget * 0.5:
         tail = tail[nl + 1:]
 
-    spill_path = _spill_summary_to_file(task_index, summary)
+    host_spill_path = _spill_summary_to_file(task_index, summary)
+    spill_path = None
+    if host_spill_path:
+        from tools.credential_files import to_agent_visible_cache_path
+
+        spill_path = to_agent_visible_cache_path(host_spill_path)
 
     footer_lines = [
         "",
