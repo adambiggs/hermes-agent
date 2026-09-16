@@ -13,6 +13,7 @@ import tempfile
 import pytest
 
 import tools.delegate_tool as dt
+import tools.terminal_tool as terminal_tool
 
 
 class _FakeCompressor:
@@ -67,6 +68,47 @@ def test_batch_overflow_trimmed_and_spilled_losslessly(monkeypatch):
             assert "offset=" in r["summary"]
             # Spilled into the delegation cache (mounted into remote backends).
             assert os.path.join("cache", "delegation") in path
+
+
+@pytest.mark.parametrize(
+    ("backend", "visible_prefix"),
+    [
+        ("docker", "/root/.hermes/cache/delegation/"),
+        ("local", None),
+    ],
+)
+def test_summary_paths_follow_configured_terminal_backend(
+    tmp_path, monkeypatch, backend, visible_prefix
+):
+    """The agent sees a cache path in its active terminal namespace."""
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        f"terminal:\n  backend: {backend}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    monkeypatch.setattr(terminal_tool, "_terminal_config_bridge_attempted", False)
+
+    summary = "SAFE_DELEGATION_MARKER\n" + ("middle row\n" * 1_000)
+    results = [{"task_index": 0, "summary": summary, "status": "completed"}]
+    dt._apply_summary_budget(results, _FakeParent(131_000, 120_000, 8_000))
+
+    host_paths = list((hermes_home / "cache" / "delegation").glob("*.txt"))
+    assert len(host_paths) == 1
+    host_path = host_paths[0]
+    assert host_path.read_text(encoding="utf-8") == summary
+
+    visible_path = results[0]["summary_full_path"]
+    footer = results[0]["summary"]
+    assert f"Full subagent output saved to: {visible_path}" in footer
+    assert f'read_file path="{visible_path}"' in footer
+    if visible_prefix is None:
+        assert visible_path == str(host_path)
+    else:
+        assert visible_path.startswith(visible_prefix)
+        assert visible_path != str(host_path)
+        assert str(host_path) not in footer
 
 
 def test_dynamic_budget_shrinks_as_batch_grows():

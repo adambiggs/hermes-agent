@@ -38,7 +38,11 @@ from toolsets import TOOLSETS
 # Must match hermes_cli.runtime_provider.RUNTIME_PROVIDER_TYPE_CUSTOM.
 _RUNTIME_PROVIDER_CUSTOM = "custom"
 from tools import file_state
-from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
+from tools.credential_files import to_agent_visible_cache_path
+from tools.terminal_tool import (
+    _ensure_terminal_env_bridged,
+    set_approval_callback as _set_subagent_approval_cb,
+)
 from utils import base_url_hostname, is_truthy_value
 
 
@@ -1810,7 +1814,7 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
 def _trim_summary_with_footer(
     summary: str, cap: int, task_index: int
 ) -> tuple[str, Optional[str]]:
-    """Return (model_text, spill_path) for one over-budget summary.
+    """Return (model_text, agent_visible_spill_path) for one over-budget summary.
 
     Mirrors web_extract's ``_truncate_with_footer``: keep a head+tail window
     (~75% head / ~25% tail, snapped to line boundaries) so the subagent's
@@ -1835,6 +1839,10 @@ def _trim_summary_with_footer(
         tail = tail[nl + 1:]
 
     spill_path = _spill_summary_to_file(task_index, summary)
+    visible_spill_path = None
+    if spill_path:
+        _ensure_terminal_env_bridged()
+        visible_spill_path = to_agent_visible_cache_path(spill_path)
 
     footer_lines = [
         "",
@@ -1842,12 +1850,14 @@ def _trim_summary_with_footer(
         f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
         f"of {original_len:,} total — trimmed to protect the parent's context window.",
     ]
-    if spill_path:
+    if visible_spill_path:
         # read_file is 1-indexed; +2 moves past the last head line shown.
         middle_start_line = head.count("\n") + 2
-        footer_lines.append(f"Full subagent output saved to: {spill_path}")
         footer_lines.append(
-            f'To read the omitted middle: read_file path="{spill_path}" '
+            f"Full subagent output saved to: {visible_spill_path}"
+        )
+        footer_lines.append(
+            f'To read the omitted middle: read_file path="{visible_spill_path}" '
             f"offset={middle_start_line} limit=200  (the file is the complete "
             f"summary; raise/lower offset to page through it)."
         )
@@ -1859,7 +1869,7 @@ def _trim_summary_with_footer(
     footer_lines.append("─" * 37)
 
     model_text = head + "\n\n[... middle omitted — see footer ...]\n\n" + tail + "\n".join(footer_lines)
-    return model_text, spill_path
+    return model_text, visible_spill_path
 
 
 def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]:
@@ -1941,19 +1951,19 @@ def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
         if len(summary) <= cap:
             continue
         original_len = len(summary)
-        model_text, spill_path = _trim_summary_with_footer(
+        model_text, visible_spill_path = _trim_summary_with_footer(
             summary, cap, entry.get("task_index", -1)
         )
         entry["summary"] = model_text
         entry["summary_truncated"] = True
-        if spill_path:
-            entry["summary_full_path"] = spill_path
+        if visible_spill_path:
+            entry["summary_full_path"] = visible_spill_path
         logger.debug(
             "[subagent-%s] summary trimmed %d → ~%d chars (spill=%s)",
             entry.get("task_index", "?"),
             original_len,
             cap,
-            spill_path or "none",
+            visible_spill_path or "none",
         )
 
 
