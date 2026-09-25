@@ -778,6 +778,29 @@ When on, web tools, the browser, vision URL fetches, and gateway media downloads
 
 The host-substring guard (which blocks lookalike Unicode domain tricks even when the underlying IP is public) stays on regardless of this setting.
 
+#### Private networks restricted by port
+
+For an operator-trusted private endpoint, use `security.allowed_private_networks`
+instead of allowing every private address. For example, a transparent egress proxy
+may share an address with internal services that must stay blocked:
+
+```yaml
+security:
+  allowed_private_networks:
+    - "10.231.1.1/32:80,443"
+```
+
+Only the listed ports at that address are exempted. Every resolved address must
+pass the policy, including at TCP connection time for Hermes-owned direct HTTP
+clients; redirects must also pass. The setting is read from the active profile.
+An empty list grants no exceptions. A bare CIDR allows all its ports; scoped IPv6
+entries use the form `"fd12::/64:443"`. Invalid entries are ignored. Cloud metadata
+hostnames, metadata IPs and the always-blocked link-local range remain blocked
+even when a CIDR includes them. Existing broader opt-outs such as
+`allow_private_urls` still apply independently; leave them disabled when port
+restrictions are required. Explicit HTTP proxies retain responsibility for their
+own destination checks.
+
 #### Local proxy fake-ip ranges
 
 A TUN proxy in fake-ip mode (Mihomo/Clash `fake-ip`, Surge enhanced mode) answers DNS with an

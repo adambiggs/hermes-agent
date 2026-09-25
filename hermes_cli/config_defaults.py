@@ -1732,6 +1732,9 @@ DEFAULT_CONFIG = {
     },
     "security": {  # Security: pre-exec scanning via tirith plus related guards.
         "allow_private_urls": False,  # allow requests to private/internal IPs (OpenWrt, VPNs)
+        # Trusted private CIDRs, optionally restricted to ports: "10.0.0.1/32:80,443".
+        # Empty grants no exceptions; cloud metadata remains blocked even within a grant.
+        "allowed_private_networks": [],
         # CIDR blocks a local TUN proxy answers DNS with (Mihomo/Clash fake-ip, Surge enhanced).
         # Answers inside these blocks are the proxy's sentinels, not internal hosts, so the guard
         # dials them instead of rejecting them as private. Empty = normal private-address verdict.

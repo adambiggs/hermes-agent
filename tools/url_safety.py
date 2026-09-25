@@ -8,6 +8,8 @@ the list is empty by default, so the sentinel stays blocked for everyone else. D
 (TOCTOU) is closed for Hermes-owned httpx paths by ``create_ssrf_safe_[async_]client()``, which
 re-apply the policy at TCP connect and dial the validated IP while preserving Host/SNI. Redirect
 bypass is mitigated by response hooks re-validating each target (``redirect_target_from_response``).
+``security.allowed_private_networks`` exempts operator-selected CIDRs, optionally restricted
+to ports (``10.0.0.1/32:80,443``), without disabling the metadata floor or other private-IP checks.
 """
 
 import ipaddress
@@ -222,6 +224,43 @@ def _global_fake_ip_ranges() -> tuple:
     return _cached_fake_ip_ranges
 
 
+def _parse_allowed_network_entry(entry: str) -> tuple:
+    """A bare CIDR grants all ports; a suffix after the CIDR restricts the grant.
+
+    Parse whole addresses first so a bare IPv6 address such as fd00::80 never
+    becomes an accidental port suffix. Scoped IPv6 entries use fd00::/64:443.
+    """
+    try:
+        return ipaddress.ip_network(entry, strict=False), None
+    except ValueError:
+        network, _, port_spec = entry.rpartition(":")
+    net = ipaddress.ip_network(network.strip(), strict=False)
+    ports = frozenset(int(port.strip()) for port in port_spec.split(","))
+    if not ports or any(port < 1 or port > 65535 for port in ports):
+        raise ValueError("Ports must be between 1 and 65535")
+    return net, ports
+
+
+def _allowed_private_networks() -> tuple:
+    """Resolve each request's grants from its profile, never another profile's cache."""
+    try:
+        from hermes_cli.config import read_raw_config
+        security = read_raw_config().get("security", {})
+        raw = security.get("allowed_private_networks") if isinstance(security, dict) else None
+    except Exception:
+        return ()  # Unavailable configuration grants no exceptions.
+    entries = [raw] if isinstance(raw, str) else raw if isinstance(raw, (list, tuple)) else ()
+    networks = []
+    for entry in entries:
+        try:
+            if not isinstance(entry, str):
+                raise ValueError("Expected a CIDR string")
+            networks.append(_parse_allowed_network_entry(entry.strip()))
+        except ValueError:
+            logger.warning("Ignoring invalid security.allowed_private_networks entry: %r", entry)
+    return tuple(networks)
+
+
 def _normalize_hostname(host: Optional[str]) -> str:
     return (host or "").strip().lower().rstrip(".")
 
@@ -326,11 +365,18 @@ def _allows_private_ip_resolution(hostname: str, scheme: str) -> bool:
     return scheme == "https" and hostname in _TRUSTED_PRIVATE_IP_HOSTS
 
 
-def _resolved_ip_block_reason(ip: _IPAddress, allow_private: bool) -> Optional[str]:
+def _resolved_ip_block_reason(
+    ip: _IPAddress, allow_private: bool, port: int, allowed_networks: tuple,
+) -> Optional[str]:
     """Why a resolved answer must be rejected, or None if it may be dialed. The metadata floor
     ignores ``allow_private``; ordinary private/internal classes are blocked only when it is False."""
     if _is_always_blocked_ip(ip):
         return "cloud metadata address"
+    if any(
+        (_embedded_ipv4(ip) in network or ip in network) and (ports is None or port in ports)
+        for network, ports in allowed_networks
+    ):
+        return None
     if not allow_private and _is_blocked_ip(ip) and not _is_declared_fake_ip(ip):
         return "private/internal address"
     return None
@@ -349,6 +395,9 @@ def is_safe_url(url: str) -> bool:
             return False
         if not hostname:
             return False
+
+        port = parsed.port if parsed.port is not None else (443 if scheme == "https" else 80)
+        allowed_networks = _allowed_private_networks()
 
         # Metadata hostnames are blocked BEFORE consulting the toggle.
         if hostname in _BLOCKED_HOSTNAMES:
@@ -375,7 +424,7 @@ def is_safe_url(url: str) -> bool:
             if ip is None:
                 logger.warning("Blocked request — unparseable IP address %r for hostname %s", raw, hostname)
                 return False
-            reason = _resolved_ip_block_reason(ip, allow_private)
+            reason = _resolved_ip_block_reason(ip, allow_private, port, allowed_networks)
             if reason is not None:
                 logger.warning("Blocked request to %s: %s -> %s", reason, hostname, ip_str)
                 return False
@@ -409,6 +458,7 @@ def _resolved_http_connect_ips(host: str, port: int, scheme: str) -> list[str]:
     if hostname in _BLOCKED_HOSTNAMES:
         raise SSRFConnectionBlocked(f"Blocked request to internal hostname: {hostname}")
     allow_private = _global_allow_private_urls() or _allows_private_ip_resolution(hostname, scheme)
+    allowed_networks = _allowed_private_networks()
     try:
         addr_info = _getaddrinfo(hostname, port)
     except socket.gaierror as exc:
@@ -419,7 +469,7 @@ def _resolved_http_connect_ips(host: str, port: int, scheme: str) -> list[str]:
             raise SSRFConnectionBlocked(
                 f"Blocked request - unparseable IP address {raw!r} for hostname {hostname}"
             ) from ValueError(f"{ip_str!r} does not appear to be an IPv4 or IPv6 address")
-        reason = _resolved_ip_block_reason(ip, allow_private)
+        reason = _resolved_ip_block_reason(ip, allow_private, port, allowed_networks)
         if reason is not None:
             raise SSRFConnectionBlocked(f"Blocked request to {reason} during connect: {hostname} -> {ip_str}")
         if ip_str not in safe_ips and len(safe_ips) < _MAX_SSRF_CONNECT_IPS:
