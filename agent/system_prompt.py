@@ -27,6 +27,7 @@ from agent.prompt_builder import (
 )
 from agent import prompt_builder as _pb
 from agent.runtime_cwd import resolve_agent_cwd, resolve_context_cwd
+from agent.prompt_overrides import apply_fragment_override
 from hermes_constants import get_default_hermes_root, get_hermes_home
 from utils import is_truthy_value
 
@@ -540,13 +541,20 @@ def _memory_parts(agent: Any) -> List[str]:
     return parts
 
 
+def _fragment(agent: Any, key: str, text: Optional[str]) -> Optional[str]:
+    """Overrides preserve fragment gates and the builder's cache-tier ordering."""
+    if not text or not text.strip():
+        return text
+    return apply_fragment_override(getattr(agent, "_prompt_overrides", None), key, text)
+
+
 def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool]:
     """SOUL.md (primary identity; cron keeps the persona while skipping cwd
     instructions, scoped to the agent's OWN home) or the default identity.
     Returns ``(parts, soul_loaded)``."""
     wants_soul = agent.load_soul_identity or not agent.skip_context_files
     _soul_content = _pb.load_soul_md(ctx_len, home_override=_agent_home(agent)) if wants_soul else None
-    return ([_soul_content], True) if _soul_content else ([DEFAULT_AGENT_IDENTITY], False)
+    return ([_fragment(agent, "identity", _soul_content or DEFAULT_AGENT_IDENTITY)], bool(_soul_content))
 
 
 def _guidance_parts(agent: Any) -> List[str]:
@@ -555,26 +563,26 @@ def _guidance_parts(agent: Any) -> List[str]:
     if agent.valid_tool_names:
         parts += [
             text for flag, text in (
-                ("_task_completion_guidance", TASK_COMPLETION_GUIDANCE),
+                ("_task_completion_guidance", _fragment(agent, "task_completion", TASK_COMPLETION_GUIDANCE)),
                 ("_parallel_tool_call_guidance", PARALLEL_TOOL_CALL_GUIDANCE),
             ) if getattr(agent, flag, True)
         ]
-    parts.append(_tool_guidance_block(agent))  # None/empty entries are dropped by _join_tier
+    parts.append(_fragment(agent, "tool_guidance", _tool_guidance_block(agent)))
     if not agent.valid_tool_names:
         return parts
     # Steering only lands inside tool results, so only reachable with tools.
-    parts.append(STEER_CHANNEL_NOTE)
+    parts.append(_fragment(agent, "steer_channel", STEER_CHANNEL_NOTE))
     # agent.tool_use_enforcement / agent.execution_guidance: "auto" (default)
     # matches the hardcoded model lists; true/false force; a list gives custom
     # model-name substrings.  Execution guidance is an independent gate so
     # DeepSeek/Kimi/Qwen-class models get it even with enforcement off.
     if _model_gate(agent._tool_use_enforcement, agent.model, TOOL_USE_ENFORCEMENT_MODELS):
-        parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
+        parts.append(_fragment(agent, "tool_use_enforcement", TOOL_USE_ENFORCEMENT_GUIDANCE))
         if any(g in (agent.model or "").lower() for g in ("gemini", "gemma")):
-            parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+            parts.append(_fragment(agent, "google_operational", GOOGLE_MODEL_OPERATIONAL_GUIDANCE))
     if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
         from agent.prompt_builder import execution_guidance_text
-        parts.append(execution_guidance_text())
+        parts.append(_fragment(agent, "execution_discipline", execution_guidance_text()))
     return parts
 
 
@@ -696,12 +704,13 @@ def _post_workspace_parts(agent: Any) -> List[str]:
     if getattr(agent, "_environment_probe", True):
         try:
             from tools.env_probe import get_environment_probe_line
-            parts.append(get_environment_probe_line())
+            parts.append(_fragment(agent, "environment_probe", get_environment_probe_line()))
         except Exception:
             pass  # Probe failure must never block prompt build.
     if getattr(agent, "_bot_mode_protocol", True):
         parts.extend(_bot_mode_parts(agent))
-    parts += [_active_profile_line(agent), platform_hint(agent)]
+    parts += [_fragment(agent, "active_profile", _active_profile_line(agent)),
+              _fragment(agent, "platform_hints", platform_hint(agent))]
     return parts
 
 
@@ -748,13 +757,14 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # in the rendered index (pure string check — inherits the index's stability).
     if "skill_view" in (agent.valid_tool_names or set()) and "- hermes-agent:" in skills_prompt:
         stable_parts[_help_guidance_slot] = HERMES_AGENT_HELP_GUIDANCE
-    stable_parts.extend(_alibaba_identity_part(agent))
+    stable_parts[_help_guidance_slot] = _fragment(agent, "hermes_help", stable_parts[_help_guidance_slot])
+    stable_parts.extend(_fragment(agent, "model_identity", text) for text in _alibaba_identity_part(agent))
     # Pinned skills are per-agent constants (resolved once), so they live in the stable prefix.
     stable_parts.extend(_auto_load_parts(agent))
     # Coding posture: the operating brief stays in the stable prefix. The
     # environment block contains the current cwd/backend and belongs after
     # project context, not ahead of a large shared AGENTS.md block.
-    environment_hints = _pb.build_environment_hints()
+    environment_hints = _fragment(agent, "environment_hints", _pb.build_environment_hints())
     coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = _coding_parts(agent)
     stable_parts.extend(coding_prefix_parts)
     post_workspace_parts = _post_workspace_parts(agent)
@@ -773,7 +783,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (most likely to differ on a rebuild; kept last so the stable prefix stays reusable) ──
     # Skills are runtime-mutable, so the index leads the volatile band: on a longest-prefix
     # backend an unchanged index stays inside the reused prefix; a changed one re-prefills from here.
-    volatile_parts: List[str] = [skills_prompt, *_memory_parts(agent)]
+    volatile_parts: List[str] = [_fragment(agent, "skills", skills_prompt), *_memory_parts(agent)]
     # Plugin sections are confined to one coarse anchor in the volatile tail so
     # a resumed process can reconstruct the stable prefix without re-running plugins.
     volatile_parts.extend(_plugin_section_blocks(_frozen_plugin_prompt_sections(agent), "after_memory"))

@@ -1351,6 +1351,9 @@ def _apply_agent_section(agent, _agent_cfg):
     # of each other (gates in agent/system_prompt.py).
     agent._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
     agent._execution_guidance = _agent_section.get("execution_guidance", "auto")
+    # Snapshot profile-local prose at construction; turns never reread config.
+    from agent.prompt_overrides import normalize_overrides
+    agent._prompt_overrides = normalize_overrides(_agent_section.get("prompt_overrides"))
 
     # Wall-clock run budget from config — only when the constructor arg was not given.
     if agent.run_budget_seconds is None:

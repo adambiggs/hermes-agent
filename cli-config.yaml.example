@@ -1139,6 +1139,21 @@ skills:
 # Agent Behavior
 # =============================================================================
 agent:
+  # Named prompt fragments: replace|append|prepend|remove plus text.
+  # A bare string means replace. Read once per agent; start a new session
+  # after changing these settings. Absent fragments stay absent.
+  # See agent/prompt_overrides.py for the fragment-key registry.
+  # prompt_overrides:
+  #   task_completion:
+  #     mode: append
+  #     text: >-
+  #       If an environment problem blocks the real path, report the exact
+  #       failure and wait for the user to fix it at the source. Do not
+  #       substitute another approach unless the user approves.
+  #   tool_use_enforcement: {mode: append, text: "Report blocked tools."}
+  #   execution_discipline: {mode: prepend, text: "Respect environment blockers."}
+  #   google_operational: {mode: remove}
+
   # Maximum tool-calling iterations per conversation (default: 500)
   # Higher = more room for complex tasks, but costs more tokens
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration

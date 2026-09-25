@@ -309,6 +309,41 @@ Most users should treat `agent/prompt_builder.py` as implementation code, not a 
 - Optional system prompt config / API overrides — add deployment-specific instruction text without forking Hermes.
 - Ephemeral overlays such as `HERMES_EPHEMERAL_SYSTEM_PROMPT` or prefill messages — add turn-scoped guidance that should not become part of the cached prompt prefix.
 
+### Per-fragment overrides (`agent.prompt_overrides`)
+
+Use `agent.prompt_overrides` in `config.yaml` to reshape a named built-in prompt fragment:
+
+```yaml
+agent:
+  prompt_overrides:
+    task_completion:
+      mode: append
+      text: >-
+        If an environment problem blocks the real path, report the exact
+        failure and wait for the user to fix it at the source. Do not
+        substitute another approach unless the user approves.
+    tool_use_enforcement: {mode: append, text: "Report blocked tools."}
+    execution_discipline: {mode: prepend, text: "Respect environment blockers."}
+    google_operational: {mode: remove}
+    steer_channel: "Use the steer channel only for urgent corrections."
+```
+
+Modes are `replace`, `append`, `prepend`, and `remove`. A bare string means `replace`.
+Malformed entries are ignored with a warning. Overrides apply only when the underlying
+fragment is present; they do not enable disabled guidance or unavailable tools.
+
+Config is loaded once per agent, using its profile scope. Start a new session after editing
+it. Overrides change prose inside the fragment's existing cache tier; ordinary turns keep
+the cached prompt, and compression retains its existing rebuild behavior. No overrides
+produce exactly the default prompt.
+
+Active keys: `identity`, `hermes_help`, `task_completion`, `tool_guidance`, `steer_channel`,
+`tool_use_enforcement`, `google_operational`, `execution_discipline`, `skills`, `model_identity`,
+`environment_hints`, `environment_probe`, `active_profile`, `platform_hints`.
+`computer_use` and `nous_subscription` remain accepted for older configurations but are
+currently no-ops because those built-in fragments were removed. The canonical registry
+is `agent/prompt_overrides.py::FRAGMENT_KEYS`.
+
 ### When to edit code instead
 
 Edit `agent/prompt_builder.py` only if you are intentionally maintaining a fork or contributing upstream behavior changes. That file assembles the prompt plumbing, cache boundaries, and injection order for every session. Direct edits there are global product changes, not per-user prompt customization.
