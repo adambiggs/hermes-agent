@@ -6,6 +6,7 @@ Split out of ``hermes_cli/config.py``; every name is re-imported there, so
 so tests patching that module still intercept the call.
 """
 
+import copy
 import logging
 import re
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -119,7 +120,7 @@ _KNOWN_PROVIDER_KEYS = {
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
     "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
-    "catalog_provider", "session_affinity_header"}
+    "catalog_provider", "session_affinity_header", "delegation_toolsets"}
 
 
 def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
@@ -264,6 +265,9 @@ def _normalize_custom_provider_entry(
             normalized[field] = entry[field]
     if isinstance(entry.get("extra_body"), dict):
         normalized["extra_body"] = dict(entry["extra_body"])
+    if "delegation_toolsets" in entry:
+        # Keep empty and malformed ceilings: dropping either would turn a denied route into an unrestricted one.
+        normalized["delegation_toolsets"] = copy.deepcopy(entry["delegation_toolsets"])
 
     # Per-provider extra HTTP headers may carry credentials — never log them downstream.
     _put("extra_headers", normalize_extra_headers(entry.get("extra_headers")))
@@ -290,7 +294,7 @@ def _custom_provider_entry_to_provider_config(
     for field in (
         "name", "api_key", "key_env", "key_cmd", "models", "models_discovered", "context_length",
         "rate_limit_delay", "discover_models", "extra_body", "extra_headers",
-        "session_affinity_header", "ssl_ca_cert", "ssl_verify", "catalog_provider"):
+        "session_affinity_header", "ssl_ca_cert", "ssl_verify", "catalog_provider", "delegation_toolsets"):
         if field in normalized:
             provider_entry[field] = normalized[field]
     if "model" in normalized:

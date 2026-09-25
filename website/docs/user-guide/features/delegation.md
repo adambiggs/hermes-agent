@@ -289,7 +289,7 @@ delegation:
 
 Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then `delegation.provider` (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; `delegation.model` applies in all cases, and when it is empty children inherit the parent's model. Setting `delegation.provider` alongside `delegation.base_url` keeps the explicit endpoint but carries that provider's request overrides and max output tokens into the child. An explicit `delegation.request_overrides` dict is honored on every branch and merges over those runtime-derived values (see [Configuration](#configuration) below).
 
-Note that the pin is global: `delegate_task` has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave `delegation.model` unset for that session or hand the task to the [kanban board](kanban.md#per-task-model-override), which does support a per-task model override.
+`delegate_task` accepts `provider` and `model` both for the whole call and on individual tasks. Per-task values take precedence over call-wide values, then the delegation defaults. An explicit provider selects that provider's own endpoint and credentials, replacing any configured direct endpoint. Configured named providers and their toolset ceilings appear in the tool schema; start a new conversation after changing configuration so an existing conversation keeps its cached schema.
 
 ## The `/review` Command
 
@@ -330,6 +330,17 @@ Credentials resolve exactly like a `delegation.provider` pin (full runtime-provi
 
 `delegate_task` does not accept a model-facing `toolsets` parameter. Each subagent inherits the parent's enabled toolsets so the model cannot grant a child capabilities that the parent does not have. Configure the parent's tools before starting the conversation if delegated work needs additional capabilities.
 
+Operators can restrict workers on a particular provider with `delegation_toolsets`:
+
+```yaml
+providers:
+  local-worker:
+    api: http://localhost:1234/v1
+    delegation_toolsets: [file]
+```
+
+This ceiling also applies to legacy `custom_providers` entries and every accepted provider alias. `delegation.delegation_toolsets` sets a global ceiling, including children on a direct `delegation.base_url`. Global and provider ceilings intersect with inherited tools; declared fallback providers' ceilings apply too. An empty list grants no tools. Invalid values refuse delegation. Model arguments cannot widen these limits, and profile credentials and ceilings remain isolated.
+
 Certain tools are blocked for subagents even when the parent has them:
 - `delegate_task` — blocked for leaf subagents (the default). Retained for `role="orchestrator"` children, bounded by `max_spawn_depth` — see [Depth Limit and Nested Orchestration](#depth-limit-and-nested-orchestration) below.
 - `clarify` — subagents cannot interact with the user
@@ -337,7 +348,7 @@ Certain tools are blocked for subagents even when the parent has them:
 - `send_message` — no cross-platform side effects
 - `cronjob` — no scheduling more work in the parent's name
 
-Both roles retain `execute_code` (programmatic tool calling) so children can batch mechanical work.
+Both roles can retain `execute_code` (programmatic tool calling) when the inherited tools and operator ceilings permit it.
 
 ## Max Iterations
 

@@ -35,6 +35,7 @@ from tools.delegate_tool_config import (  # noqa: F401
     _subagent_auto_approve, _subagent_auto_deny,
 )
 from tools.delegate_tool_dispatch import _Batch, _announce_batch, _capture_origin, _run_batch
+from tools.delegate_tool_routing import _build_provider_param_description, _cap_child_toolsets, _resolve_task_routes
 from tools.delegate_tool_progress import (  # noqa: F401
     DelegateEvent, SUBAGENT_FAILURE_STATUSES, _batch_prefix, _build_child_progress_callback,
     _build_child_system_prompt, _clean_error_text, _emit_parent_console, _quiet, _resolve_workspace_hint,
@@ -200,13 +201,25 @@ def _build_child_agent(
     # as auxiliary.review.
     delegation_cfg = _load_config()
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
+    parent_api_key = getattr(parent_agent, "api_key", None)
+    if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
+        parent_api_key = parent_agent._client_kwargs.get("api_key")
+
+    rt = _resolve_child_runtime(
+        parent_agent, delegation_cfg, parent_api_key, model=model, override_provider=override_provider,
+        override_base_url=override_base_url, override_api_key=override_api_key, override_api_mode=override_api_mode,
+        override_acp_command=override_acp_command,
+        override_acp_args=override_acp_args,
+        routing_cfg=routing_cfg,
+    )
+    child_toolsets = _cap_child_toolsets(child_toolsets, rt, delegation_cfg)
+    from toolsets import resolve_toolset
+    if not any("delegate_task" in resolve_toolset(name) for name in child_toolsets):
+        effective_role = "leaf"
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=_resolve_workspace_hint(parent_agent), role=effective_role,
         max_spawn_depth=max_spawn, child_depth=child_depth,
     )
-    parent_api_key = getattr(parent_agent, "api_key", None)
-    if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
-        parent_api_key = parent_agent._client_kwargs.get("api_key")
 
     # Shared ref: session_id once the child exists, delegation_id once
     # delegate_task stamps it — both ride on every relayed event.
@@ -215,13 +228,6 @@ def _build_child_agent(
         task_index, goal, parent_agent, task_count, subagent_id=subagent_id, parent_id=parent_subagent_id,
         depth=max(0, child_depth - 1),  # 0 = first-level child for the UI
         model=model or getattr(parent_agent, "model", None), toolsets=child_toolsets, session_ref=child_session_ref,
-    )
-    rt = _resolve_child_runtime(
-        parent_agent, delegation_cfg, parent_api_key, model=model, override_provider=override_provider,
-        override_base_url=override_base_url, override_api_key=override_api_key, override_api_mode=override_api_mode,
-        override_acp_command=override_acp_command,
-        override_acp_args=override_acp_args,
-        routing_cfg=routing_cfg,
     )
     if override_request_overrides is not None:
         # honored whenever set, incl. the inherit branch where
@@ -366,21 +372,23 @@ def _build_children(
     task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
     live_deleg_id: Optional[str], live_writers: list, task_images: Optional[List[Optional[List[str]]]] = None,
+    task_routes: Optional[list] = None,
 ) -> tuple[List[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe);
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
-    overrides = {
-        "override_provider": creds["provider"], "override_base_url": creds["base_url"],
-        "override_api_key": creds["api_key"], "override_api_mode": creds["api_mode"],
-        "override_request_overrides": creds.get("request_overrides"),
-        "override_acp_command": creds.get("command"),
-        "override_acp_args": creds.get("args"),
-        "routing_cfg": routing_cfg,
-    }
     children = []
     for i, t in enumerate(task_list):
+        child_creds, child_routing_cfg = task_routes[i] if task_routes else (creds, routing_cfg)
+        overrides = {
+            "override_provider": child_creds["provider"], "override_base_url": child_creds["base_url"],
+            "override_api_key": child_creds["api_key"], "override_api_mode": child_creds["api_mode"],
+            "override_request_overrides": child_creds.get("request_overrides"),
+            "override_acp_command": child_creds.get("command"),
+            "override_acp_args": child_creds.get("args"),
+            "routing_cfg": child_routing_cfg,
+        }
         _task_schema = task_schemas[i] if i < len(task_schemas) else None
         _child_context = t.get("context")
         if _task_schema is not None:
@@ -389,10 +397,15 @@ def _build_children(
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
+                model=child_creds["model"], max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
             )
         except ValueError as exc:
+            from tools.delegate_tool_child_run import _detach_child
+            for _, _, built_child in children:
+                _detach_child(parent_agent, built_child)
+                with _quiet("Could not close child after batch preflight failure"):
+                    built_child.close()
             return [], str(exc)
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
@@ -443,6 +456,7 @@ def delegate_task(
     output_schema: Optional[Dict[str, Any]] = None, images: Optional[List[str]] = None, action: Optional[str] = None,
     subagent_id: Optional[str] = None, message: Optional[str] = None, parent_agent=None,
     credentials_cfg: Optional[Dict[str, Any]] = None,
+    provider: Optional[str] = None, model: Optional[str] = None,
 ) -> str:
     """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control running ones. ``action``
     list/steer/stop run synchronously and bypass the pause gate, depth limit and async dispatch. ``role`` is legacy
@@ -491,12 +505,6 @@ def delegate_task(
     # a per-call routing owner shaped like the delegation config section. Keep
     # the route and its fallback policy together through child construction.
     routing_cfg = credentials_cfg if credentials_cfg is not None else cfg
-    try:
-        creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
-    except ValueError as exc:
-        # Explicit-pin preflight failures (e.g. pinned delegation.command missing from PATH) refuse the
-        # spawn loudly (#80450).
-        return tool_error(str(exc))
     max_children = _get_max_concurrent_children()
     task_list, err = _normalize_task_list(goal, context, tasks, output_schema, top_role, max_children)
     if not err:
@@ -505,6 +513,11 @@ def delegate_task(
         task_images, err = _coerce_task_images(task_list, images)
     if err:
         return tool_error(err)
+    try:
+        task_routes = _resolve_task_routes(task_list, routing_cfg, parent_agent, provider=provider, model=model)
+    except ValueError as exc:
+        return tool_error(str(exc))
+    creds = task_routes[0][0]
     err = _oneshot_spawn_budget(parent_agent, len(task_list))
     if err:
         return tool_error(err)
@@ -522,6 +535,7 @@ def delegate_task(
     children, err = _build_children(
         task_list, task_schemas, creds, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
         routing_cfg=routing_cfg, live_deleg_id=live_deleg_id, live_writers=live_writers, task_images=task_images,
+        task_routes=task_routes,
     )
     if err:
         return tool_error(err)
@@ -590,7 +604,7 @@ _DESCRIPTION_HEAD = (
     "the parent applies the transition.\n"
 )
 _DESCRIPTION_TAIL = (
-    "- Children inherit the parent model unless pinned via delegation.provider / delegation.model in config.yaml."
+    "- Children inherit the parent model unless routed with provider/model or pinned via delegation.provider / delegation.model in config.yaml."
 )
 
 def _build_tasks_param_description() -> str:
@@ -616,6 +630,14 @@ def _build_dynamic_schema_overrides() -> dict:
     # Copy properties so the static schema dict is never mutated.
     overrides_params["properties"] = {k: dict(v) for k, v in DELEGATE_TASK_SCHEMA["parameters"]["properties"].items()}
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
+
+    provider_description = _build_provider_param_description()
+    overrides_params["properties"]["provider"]["description"] = provider_description
+    tasks = overrides_params["properties"]["tasks"]
+    tasks["items"] = {**tasks["items"], "properties": {
+        k: dict(v) for k, v in tasks["items"]["properties"].items()
+    }}
+    tasks["items"]["properties"]["provider"]["description"] = provider_description
 
     if not independent_completions:
         tasks = overrides_params["properties"]["tasks"]
@@ -663,6 +685,8 @@ DELEGATE_TASK_SCHEMA = {
                             "Background THIS child needs: file paths, error messages, constraints. Each child "
                             "sees only its own context — repeat shared background in every task that needs it.",
                         ),
+                        "provider": _p("string", "Optional provider override; configured providers are listed at runtime."),
+                        "model": _p("string", "Optional model for this child; overrides the call-wide model."),
                         "output_schema": _p(
                             "object",
                             "Optional JSON Schema this child's final answer must validate against (told to the "
@@ -692,6 +716,8 @@ DELEGATE_TASK_SCHEMA = {
             },
             # `background` (bool) is also accepted — DEPRECATED, ignored: top-level
             # delegations always run in the background. Unadvertised; do not re-add.
+            "provider": _p("string", "Optional default provider for all tasks; each task may override it."),
+            "model": _p("string", "Optional default model for all tasks; each task may override it."),
             "action": _p(
                 "string",
                 "Default 'spawn'. Live control of running children: "
@@ -743,7 +769,7 @@ registry.register(
         max_iterations=args.get("max_iterations"), role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")), output_schema=args.get("output_schema"),
         images=args.get("images"), action=args.get("action"), subagent_id=args.get("subagent_id"), message=args.get("message"),
-        parent_agent=kw.get("parent_agent"),
+        parent_agent=kw.get("parent_agent"), provider=args.get("provider"), model=args.get("model"),
     ),
     check_fn=check_delegate_requirements,
     emoji="🔀",

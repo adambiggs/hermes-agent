@@ -1308,6 +1308,7 @@ DEFAULT_CONFIG = {
     # cheaper/faster model. Uses the same runtime provider resolution as CLI/gateway startup, so
     # every configured provider is supported.
     "delegation": {
+        "delegation_toolsets": None,  # null inherits; [] denies every child tool
         "model": "",  # e.g. "google/gemini-3-flash-preview" (empty = inherit parent)
         "provider": "",  # e.g. "openrouter" (empty = inherit parent provider + credentials)
         # Fallback chain for delegated children (same entry format as the top-level list).
