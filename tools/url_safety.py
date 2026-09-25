@@ -244,8 +244,8 @@ def _parse_allowed_network_entry(entry: str) -> tuple:
 def _allowed_private_networks() -> tuple:
     """Resolve each request's grants from its profile, never another profile's cache."""
     try:
-        from hermes_cli.config import read_raw_config
-        security = read_raw_config().get("security", {})
+        from hermes_cli.config import read_raw_config_readonly
+        security = read_raw_config_readonly().get("security", {})
         raw = security.get("allowed_private_networks") if isinstance(security, dict) else None
     except Exception:
         return ()  # Unavailable configuration grants no exceptions.
