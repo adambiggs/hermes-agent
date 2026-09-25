@@ -339,7 +339,7 @@ providers:
     delegation_toolsets: [file]
 ```
 
-This ceiling also applies to legacy `custom_providers` entries and every accepted provider alias. `delegation.delegation_toolsets` sets a global ceiling, including children on a direct `delegation.base_url`. Global and provider ceilings intersect with inherited tools; declared fallback providers' ceilings apply too. An empty list grants no tools. Invalid values refuse delegation. Model arguments cannot widen these limits, and profile credentials and ceilings remain isolated.
+This ceiling also applies to legacy `custom_providers` entries and every route to the same normalized endpoint, including generic aliases and duplicate provider entries. Disabling a named provider does not remove its endpoint ceiling. `delegation.delegation_toolsets` sets a global ceiling, including children on a direct `delegation.base_url`. Global and provider ceilings intersect with inherited tools; fallback endpoints' ceilings apply too. When provider ceilings exist, implicit fallback endpoints must resolve before child construction; a failed resolution refuses delegation. An empty list grants no tools. Invalid values refuse delegation. Model arguments cannot widen these limits, and profile credentials and ceilings remain isolated.
 
 Certain tools are blocked for subagents even when the parent has them:
 - `delegate_task` — blocked for leaf subagents (the default). Retained for `role="orchestrator"` children, bounded by `max_spawn_depth` — see [Depth Limit and Nested Orchestration](#depth-limit-and-nested-orchestration) below.

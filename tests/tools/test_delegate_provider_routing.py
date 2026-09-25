@@ -147,6 +147,52 @@ def test_provider_schema_is_profile_scoped_copy_safe_and_caps_direct_routes(tmp_
             result = json.loads(registry.dispatch("delegate_task", {"goal": "Inspect the project"}, parent_agent=_parent()))
             assert "refusing uncapped delegation" in result["error"]
             config["delegation"].pop("delegation_toolsets")
+            configured_endpoint = config["providers"]["local-worker"]["api"]
+            config["delegation"].update({
+                "provider": "custom:local-worker", "base_url": configured_endpoint,
+            })
+            for fallback in (False, True):
+                if fallback:
+                    config["delegation"].pop("provider")
+                    config["delegation"]["fallback_providers"] = [{
+                        "provider": "custom:local-worker", "model": "fallback-model",
+                        "base_url": configured_endpoint,
+                    }]
+                config_path.write_text(yaml.safe_dump(config))
+                result = json.loads(registry.dispatch("delegate_task", {"goal": "Inspect the project"}, parent_agent=_parent()))
+                child = result["children"][0]
+                assert child["base_url"] == configured_endpoint
+                assert child["tools"] and set(child["tools"]) <= set(resolve_toolset("file"))
+            config["delegation"].pop("fallback_providers")
+            config["model"] = {"provider": "custom", "base_url": configured_endpoint + "/", "default": "local-model"}
+            config["providers"]["local-worker"]["api"] = configured_endpoint + "///"
+            config["providers"]["same-endpoint"] = {"api": configured_endpoint + "/"}
+            config_path.write_text(yaml.safe_dump(config))
+            for alias in ("custom", "ollama", "custom:same-endpoint"):
+                config["providers"]["local-worker"]["enabled"] = alias != "ollama"
+                config_path.write_text(yaml.safe_dump(config))
+                result = json.loads(registry.dispatch("delegate_task", {
+                    "goal": "Inspect the project", "provider": alias,
+                }, parent_agent=_parent()))
+                child = result["children"][0]
+                assert child["base_url"].rstrip("/") == configured_endpoint
+                assert child["tools"] and set(child["tools"]) <= set(resolve_toolset("file"))
+            config["delegation"].update({
+                "base_url": "http://127.0.0.1:8003/v1",
+                "fallback_providers": [{
+                    "provider": "custom", "model": "fallback-model", "base_url": configured_endpoint + "/",
+                }],
+            })
+            config_path.write_text(yaml.safe_dump(config))
+            result = json.loads(registry.dispatch("delegate_task", {"goal": "Inspect the project"}, parent_agent=_parent()))
+            assert result["children"][0]["base_url"] != configured_endpoint
+            assert result["children"][0]["tools"] and set(result["children"][0]["tools"]) <= set(resolve_toolset("file"))
+            for alias in ("custom", "ollama"):
+                config["delegation"]["fallback_providers"] = [{"provider": alias, "model": "fallback-model"}]
+                config_path.write_text(yaml.safe_dump(config))
+                result = json.loads(registry.dispatch("delegate_task", {"goal": "Inspect the project"}, parent_agent=_parent()))
+                assert result["children"][0]["tools"] and set(result["children"][0]["tools"]) <= set(resolve_toolset("file"))
+            config["delegation"].pop("fallback_providers")
             config["providers"]["invalid-worker"] = {
                 "api": "http://127.0.0.1:8004/v1", "delegation_toolsets": False,
             }

@@ -212,7 +212,7 @@ def _build_child_agent(
         override_acp_args=override_acp_args,
         routing_cfg=routing_cfg,
     )
-    child_toolsets = _cap_child_toolsets(child_toolsets, rt, delegation_cfg)
+    child_toolsets = _cap_child_toolsets(child_toolsets, rt, delegation_cfg, routing_cfg=routing_cfg)
     from toolsets import resolve_toolset
     if not any("delegate_task" in resolve_toolset(name) for name in child_toolsets):
         effective_role = "leaf"
