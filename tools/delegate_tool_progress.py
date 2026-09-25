@@ -188,12 +188,14 @@ def _build_child_system_prompt(
     parts = ["You are a focused subagent working on a specific delegated task."]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
-    if workspace_path and str(workspace_path).strip():
+    tool_workspace = _resolve_tool_workspace_hint(workspace_path)
+    if tool_workspace and str(tool_workspace).strip():
         parts.append(
             "\nWORKSPACE PATH:\n"
-            f"{workspace_path}\n"
+            f"{tool_workspace}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
+    if workspace_path and str(workspace_path).strip():
         # Project context files (AGENTS.md / CLAUDE.md / .cursorrules ...) via the SAME discovery/priority/cap logic
         # as the main agent's prompt: children are built with skip_context_files=True, so without this a subagent
         # works in a repo blind to its conventions. SOUL.md is skipped (identity belongs to the parent).
@@ -216,9 +218,23 @@ def _build_child_system_prompt(
         )
     return "\n".join(parts)
 
+def _resolve_tool_workspace_hint(workspace_path: Optional[str]) -> Optional[str]:
+    """Translate only workdir instructions; project context is read on the gateway."""
+    from tools.terminal_tool import _get_env_config
+    from tools.terminal_tool_config import _is_container_backend
+
+    try:
+        config = _get_env_config()
+    except Exception:
+        logger.debug("Could not resolve child workspace from terminal config", exc_info=True)
+        return None
+    if _is_container_backend(config["env_type"]):
+        return config["cwd"] or None
+    return workspace_path
+
+
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
-    """Best-effort local workspace hint for child prompts: only a concrete
-    absolute directory is ever injected (never a fake container path)."""
+    """Best-effort local workspace hint for context discovery and worktree creation."""
     from agent.runtime_cwd import scope_terminal_cwd
     candidates = [
         scope_terminal_cwd(), getattr(getattr(parent_agent, "_subdirectory_hints", None), "working_dir", None),
