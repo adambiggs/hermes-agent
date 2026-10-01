@@ -16,9 +16,10 @@ import stat
 import threading
 import time
 from contextlib import ExitStack
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from agent.file_safety import get_nt_namespace_error, get_read_block_error
+from agent.file_safety import (
+    get_nt_namespace_error, get_read_block_error, get_safe_write_roots, get_write_denied_error)
 from agent.tool_result_classification import GUARDRAIL_REFUSAL_KEY
 from tools.binary_extensions import has_binary_extension
 from tools.skill_provenance import is_background_review
@@ -133,7 +134,9 @@ _BLOCKED_PROC_SUFFIXES = (
 def _file_ops_uses_host_paths(file_ops) -> bool:
     """True when *file_ops* targets the host filesystem (only then may we stat paths
     or rewrite V4A headers to host-absolute paths; sandboxes have their own namespace)."""
-    env = getattr(file_ops, "env", None)
+    if not isinstance(file_ops, ShellFileOperations):
+        return True
+    env = file_ops.env
     if env is None:
         return True
     try:
@@ -141,6 +144,70 @@ def _file_ops_uses_host_paths(file_ops) -> bool:
     except ImportError:
         return True
     return isinstance(env, LocalEnvironment)
+
+
+def _backend_task_cwd(task_id: str, file_ops) -> str:
+    from tools.file_tools_paths import _terminal_env_type_for_task
+    from tools.terminal_tool import _resolve_command_cwd
+    return _resolve_command_cwd(
+        workdir=None, default_cwd=file_ops.cwd, session_key=task_id,
+        env_type=_terminal_env_type_for_task(task_id))
+
+
+def _resolve_file_tool_path(path: str, task_id: str, file_ops):
+    if _file_ops_uses_host_paths(file_ops):
+        return _resolve_path_for_task(path, task_id)
+    backend_path = file_ops.resolve_backend_path(path, cwd=_backend_task_cwd(task_id, file_ops))
+    if backend_path is None:
+        raise ValueError(f"Could not resolve {path!r} in the terminal backend")
+    return PurePosixPath(backend_path)
+
+
+def _backend_home_alias(resolved_path, file_ops) -> str | None:
+    """Express a backend home path as ``~/...`` for the existing home guards."""
+    if _file_ops_uses_host_paths(file_ops):
+        return None
+    home = file_ops.resolve_backend_path("~")
+    for base in (home, "/root"):
+        if not base:
+            continue
+        try:
+            relative = PurePosixPath(resolved_path).relative_to(PurePosixPath(base))
+        except ValueError:
+            continue
+        return "~/" + str(relative) if str(relative) != "." else "~"
+    return None
+
+
+def _backend_hermes_guard_path(home_alias: str | None, resolved_path) -> str | None:
+    """Map a backend home Hermes path onto the active root for shared guards."""
+    candidate = home_alias or ""
+    if not (candidate == "~/.hermes" or candidate.startswith("~/.hermes/")):
+        # Docker and Modal mount Hermes state here even if the backend's HOME
+        # points somewhere else.
+        candidate = str(resolved_path)
+        if not (candidate == "/root/.hermes" or candidate.startswith("/root/.hermes/")):
+            return None
+        suffix = candidate[len("/root/.hermes"):].lstrip("/")
+    else:
+        suffix = candidate[len("~/.hermes"):].lstrip("/")
+    if not suffix:
+        return None
+    from hermes_constants import get_default_hermes_root
+    return str(get_default_hermes_root() / suffix)
+
+
+def _backend_home_guard_paths(path: str, resolved_path, task_id: str, file_ops) -> list[str]:
+    """Guard both a backend path's spelling and the target reached through symlinks."""
+    lexical = file_ops.resolve_backend_path(
+        path, cwd=_backend_task_cwd(task_id, file_ops), follow_symlinks=False)
+    candidates = [str(resolved_path)]
+    if lexical:
+        candidates.append(lexical)
+    aliases = [_backend_home_alias(candidate, file_ops) for candidate in candidates]
+    mapped = [_backend_hermes_guard_path(alias, candidate)
+              for alias, candidate in zip(aliases, candidates)]
+    return list(dict.fromkeys(p for p in (*aliases, *mapped) if p))
 
 
 # V4A file headers: group 1 = header prefix, 2 = op, 3 = path. ``\s*`` after
@@ -418,7 +485,8 @@ def _special_file_kind(path) -> str | None:
                 "a special (non-regular) file")
 
 
-def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task_id: str) -> str | None:
+def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task_id: str,
+                             file_ops, backend_guard_paths: list[str]) -> str | None:
     """Render an extractable document (.docx/.xlsx/.pdf/...) as paginated text.
 
     Returns the JSON result, a tool_error for an actionable extraction failure
@@ -431,7 +499,9 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
 
     if not is_extractable_document(str(_resolved)):
         return None
-    file_ops = _get_file_ops(task_id)
+    host_paths = _file_ops_uses_host_paths(file_ops)
+    remote_ipynb = not host_paths and _resolved.suffix.lower() == ".ipynb"
+    digest_before = file_ops.file_sha256(str(_resolved)) if remote_ipynb else None
     try:
         binary = file_ops.read_file_bytes(str(_resolved), max_bytes=MAX_DOCUMENT_BYTES)
         if binary.error or binary.base64_content is None:
@@ -477,7 +547,7 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
         rendered = result_dict["content"]
         result_dict["content"] = redact_sensitive_text(
             rendered, file_read=True,
-            secret_file=_is_secret_file_arg(str(_resolved)))
+            secret_file=any(_is_secret_file_arg(p) for p in (path, str(_resolved), *backend_guard_paths)))
         redacted = result_dict["content"] != rendered
     else:
         redacted = False
@@ -486,9 +556,12 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
         # The whole document was shown, so a text-authorable format (.ipynb)
         # may later be overwritten by write_file; the binary-container guard
         # keeps refusing .docx/.xlsx/.pdf regardless of this baseline.
-        _mark_full_write_baseline(str(_resolved), task_id)
-        _update_read_timestamp(str(_resolved), task_id)
-        file_state.record_read(task_id, str(_resolved))
+        if host_paths:
+            _mark_full_write_baseline(str(_resolved), task_id)
+            _update_read_timestamp(str(_resolved), task_id)
+            file_state.record_read(task_id, str(_resolved))
+        elif remote_ipynb and digest_before is not None:
+            _mark_full_write_baseline(str(_resolved), task_id, digest_before, file_ops=file_ops)
     return json.dumps(result_dict, ensure_ascii=False)
 
 
@@ -528,7 +601,8 @@ def _dedup_stub_or_block(task_data: dict, dedup_key: tuple, path: str) -> str:
 def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_str: str,
                             offset: int, limit: int, dedup_key: tuple, *, partial: bool,
                             redacted: bool = False, end_line: int | None = None,
-                            total_lines=None, version_before=None, snapshot=None) -> int:
+                            total_lines=None, version_before=None, snapshot=None,
+                            file_ops=None) -> int:
     """Bookkeeping after a real (non-stub) read; returns the consecutive-read count.
 
     Per-task tracker under the lock (stub counter, history, consecutive count,
@@ -541,19 +615,25 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
     background-review read-mark (a FULL read of a skill file counts like
     skill_view so a follow-up skill_manage(patch) is accepted).
     """
-    version = (snapshot or _file_version(resolved_str)) if version_before is not None else None
-    stable = version is not None and version[:-1] == version_before == _file_metadata(resolved_str)
+    if file_ops is None:
+        version = (snapshot or _file_version(resolved_str)) if version_before is not None else None
+        stable = version is not None and version[:-1] == version_before == _file_metadata(resolved_str)
+    else:
+        digest = file_ops.file_sha256(resolved_str) if version_before is not None else None
+        version = ("backend-sha256", digest) if digest is not None else None
+        stable = version is not None and version == version_before
     complete = False
     with _read_tracker_lock:
         task_data["dedup_hits"].pop(dedup_key, None)
         task_data["dedup_generation_reads"].add(dedup_key)
         task_data["read_history"].add((path, offset, limit))
         count = _bump_consecutive(task_data, ("read", path, offset, limit))
-        try:
-            _mtime_now = os.path.getmtime(resolved_str)
-            task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
-        except OSError:
-            pass
+        if file_ops is None:
+            try:
+                _mtime_now = os.path.getmtime(resolved_str)
+                task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
+            except OSError:
+                pass
         baselines = task_data["full_write_baselines"]
         if stable and version is not None and count < 4:
             task_data["dedup"][dedup_key] = version_before
@@ -575,10 +655,11 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
             task_data["dedup_generation_reads"].discard(dedup_key)
         _cap_read_tracker_data(task_data)
 
-    try:
-        file_state.record_read(task_id, resolved_str, partial=not complete)
-    except Exception:
-        logger.debug("file_state.record_read failed", exc_info=True)
+    if file_ops is None:
+        try:
+            file_state.record_read(task_id, resolved_str, partial=not complete)
+        except Exception:
+            logger.debug("file_state.record_read failed", exc_info=True)
 
     if complete:
         try:
@@ -613,17 +694,29 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
         nt_err = get_nt_namespace_error(path, verb="Read")
         if nt_err:
             return tool_error(nt_err)
-
-        device_base = None if Path(path).expanduser().is_absolute() else _resolve_base_dir(task_id)
-        if _is_blocked_device(path, base_dir=device_base):
+        if _is_blocked_device_path(path):
             return tool_error(
                 f"Cannot read '{path}': this is a device file that would "
                 "block or produce infinite output.")
+        from tools.file_tools_paths import _terminal_env_type_for_task
+        if _terminal_env_type_for_task(task_id) == "local":
+            device_base = None if Path(path).expanduser().is_absolute() else _resolve_base_dir(task_id)
+            if _is_blocked_device(path, base_dir=device_base):
+                return tool_error(
+                    f"Cannot read '{path}': this is a device file that would "
+                    "block or produce infinite output.")
 
-        _resolved = _resolve_path_for_task(path, task_id)
+        file_ops = _get_file_ops(task_id)
+        _resolved = _resolve_file_tool_path(path, task_id, file_ops)
+        if _file_ops_uses_host_paths(file_ops) and _is_blocked_device(str(_resolved)):
+            return tool_error(
+                f"Cannot read '{path}': this is a device file that would "
+                "block or produce infinite output.")
+        if not _file_ops_uses_host_paths(file_ops) and _is_blocked_device_path(str(_resolved)):
+            return tool_error(f"Cannot read '{path}': this is a device file")
 
         # A read on a FIFO/socket blocks until the exec timeout: a self-shipped DoS.
-        if _file_ops_uses_host_paths(_get_file_ops(task_id)):
+        if _file_ops_uses_host_paths(file_ops):
             kind = _special_file_kind(_resolved)
             if kind is not None:
                 return json.dumps({
@@ -638,11 +731,17 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
         # credential stores). Runs BEFORE document extraction so a
         # protected SQLite store (state.db) cannot be read through the extractor. Pass the RESOLVED path: the denylist's own
         # resolve() uses the process cwd and would miss a relative "auth.json".
+        backend_guard_paths = ([] if _file_ops_uses_host_paths(file_ops) else
+                               _backend_home_guard_paths(path, _resolved, task_id, file_ops))
         block_error = get_read_block_error(str(_resolved))
+        if not block_error:
+            block_error = next((reason for guarded in backend_guard_paths
+                                if (reason := get_read_block_error(guarded))), None)
         if block_error:
             return tool_error(block_error)
 
-        extracted = _read_extracted_document(path, _resolved, offset, limit, task_id)
+        extracted = _read_extracted_document(path, _resolved, offset, limit, task_id,
+                                              file_ops, backend_guard_paths)
         if extracted is not None:
             return extracted
 
@@ -669,13 +768,17 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
             content_served_in_generation = dedup_key in task_data["dedup_generation_reads"]
         # Same rule as skill_view: the review fork shares the parent's task_id and its
         # read-before-write guard needs a real read, which the stub path never records (#95976).
-        file_ops = _get_file_ops(task_id)
-        version_before = _file_metadata(resolved_str) if _file_ops_uses_host_paths(file_ops) else None
+        host_paths = _file_ops_uses_host_paths(file_ops)
+        if host_paths:
+            version_before = _file_metadata(resolved_str)
+        else:
+            digest = file_ops.file_sha256(resolved_str)
+            version_before = ("backend-sha256", digest) if digest is not None else None
         if (cached_version is not None and not is_background_review()
                 and version_before == cached_version and content_served_in_generation):
             return _dedup_stub_or_block(task_data, dedup_key, path)
 
-        result = file_ops.read_file(resolved_str if _file_ops_uses_host_paths(file_ops) else path, offset, limit)
+        result = file_ops.read_file(resolved_str, offset, limit)
         result_dict = result.to_dict()
 
         # Failed reads cannot establish whole-file knowledge.
@@ -698,7 +801,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
         if result.content:
             unredacted = result.content
             result.content = redact_sensitive_text(
-                unredacted, file_read=True, secret_file=_is_secret_file_arg(resolved_str))
+                unredacted, file_read=True,
+                secret_file=any(_is_secret_file_arg(p)
+                                for p in (path, resolved_str, *backend_guard_paths)))
             redacted = result.content != unredacted
             result_dict["content"] = result.content
 
@@ -729,7 +834,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
                                         redacted=redacted or bool(result_dict.get("truncated_lines")),
                                         end_line=end_line, total_lines=total_lines,
                                         version_before=version_before,
-                                        snapshot=getattr(result, "_snapshot", None))
+                                        snapshot=getattr(result, "_snapshot", None),
+                                        file_ops=None if host_paths else file_ops)
         if count >= 4:
             return tool_error(
                 f"BLOCKED: You have read this exact file region {count} times in a row. "
@@ -794,13 +900,15 @@ def _edit_warnings(paths: list[str], path_to_resolved: dict, task_id: str) -> li
     return warnings
 
 
-def _note_edited(task_id: str, paths: list[str], path_to_resolved: dict, session_id: str | None) -> None:
+def _note_edited(task_id: str, paths: list[str], path_to_resolved: dict, session_id: str | None,
+                 *, host_paths: bool = True) -> None:
     """Post-success bookkeeping: verification-stale marker, then per path refresh
     the read stamp (no false staleness on the next edit) and record the write."""
     _mark_verification_stale(task_id, [path_to_resolved.get(p) or p for p in paths], session_id=session_id)
     for p in paths:
-        _update_read_timestamp(p, task_id)
-        if path_to_resolved.get(p):
+        if host_paths:
+            _update_read_timestamp(p, task_id)
+        if host_paths and path_to_resolved.get(p):
             file_state.note_write(task_id, path_to_resolved[p])
 
 
@@ -860,21 +968,53 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     cross-PROFILE guard it was named for no longer exists).
     """
     # write_file checks the binary-document guard before the mirror guard.
-    err = (_check_sensitive_path(path, task_id)
-           or _check_binary_document_write(path, task_id)
-           or _check_protected_instruction_write([path], task_id)
-           or _check_approval_required_write([path], task_id)
-           or (None if cross_profile else _check_cross_profile_path(path, task_id)))
-    if not err and _is_internal_file_tool_content(content):
-        err = ("Refusing to write internal read_file display text as file content. "
-               "Strip read_file line-number prefixes or reconstruct the intended "
-               "file contents before writing.")
+    nt_err = get_nt_namespace_error(path, verb="Write")
+    if nt_err:
+        return tool_error(nt_err)
+    if _is_internal_file_tool_content(content):
+        return tool_error(
+            "Refusing to write internal read_file display text as file content. "
+            "Strip read_file line-number prefixes or reconstruct the intended "
+            "file contents before writing.")
+    try:
+        file_ops = _get_file_ops(task_id)
+        resolved_path = _resolve_file_tool_path(path, task_id, file_ops)
+    except (OSError, ValueError) as exc:
+        return tool_error(str(exc))
+    host_paths = _file_ops_uses_host_paths(file_ops)
+    guard_paths = [path] if host_paths else [str(resolved_path)]
+    if not host_paths:
+        safe_roots = get_safe_write_roots()
+        if safe_roots and not any(PurePosixPath(resolved_path).is_relative_to(PurePosixPath(root))
+                                  for root in safe_roots):
+            return tool_error(
+                f"Write denied: '{path}' is outside HERMES_WRITE_SAFE_ROOT "
+                f"({os.pathsep.join(sorted(safe_roots))}).")
+        guard_paths.extend(_backend_home_guard_paths(path, resolved_path, task_id, file_ops))
+    err = None
+    for index, guard_path in enumerate(guard_paths):
+        physical_backend_path = not host_paths and index == 0
+        err = (_check_sensitive_path(guard_path, task_id,
+                                     backend_resolved=physical_backend_path)
+               or (None if physical_backend_path else get_write_denied_error(guard_path))
+               or _check_binary_document_write(
+                   guard_path, task_id,
+                   backend_file_ops=None if host_paths else file_ops,
+                   backend_path=str(resolved_path)))
+        if err:
+            break
+    if not err:
+        err = (_check_protected_instruction_write(guard_paths, task_id)
+               or _check_approval_required_write(guard_paths, task_id))
+    if not err and not cross_profile:
+        err = next((result for p in guard_paths
+                    if (result := _check_cross_profile_path(p, task_id))), None)
     if err:
         return tool_error(err)
     try:
         # Resolution failure falls back to the legacy unlocked path (the write
         # still proceeds; the per-task staleness check still runs).
-        _resolved = _resolve_or_none(path, task_id)
+        _resolved = str(resolved_path)
         path_to_resolved = {path: _resolved}
         with ExitStack() as _lock:
             if _resolved:
@@ -889,7 +1029,7 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
                 return json.dumps(_stale_write_refusal(path, blocker, _resolved), ensure_ascii=False)
             warnings = _edit_warnings([path], path_to_resolved, task_id)
             rewrite_hint = _whole_file_rewrite_hint(task_id, _resolved, content)
-            result = _get_file_ops(task_id).write_file(_resolved or path, content)
+            result = file_ops.write_file(_resolved, content, backend_guarded=not host_paths) if not host_paths else file_ops.write_file(_resolved, content)
             result_dict = result.to_dict()
             if warnings:
                 result_dict["_warning"] = warnings[0]
@@ -906,8 +1046,12 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
                     result_dict["files_modified"] = [_resolved]
                     # Own write = current whole-file content: consecutive
                     # same-task writes stay unblocked. patch never does this.
-                    _mark_full_write_baseline(_resolved, task_id, getattr(result, "_content_sha256", None))
-                _note_edited(task_id, [path], path_to_resolved, session_id)
+                    _mark_full_write_baseline(
+                        _resolved, task_id, getattr(result, "_content_sha256", None),
+                        file_ops=None if _file_ops_uses_host_paths(file_ops)
+                        else file_ops)
+                _note_edited(task_id, [path], path_to_resolved, session_id,
+                             host_paths=_file_ops_uses_host_paths(file_ops))
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         if _is_expected_write_exception(e):

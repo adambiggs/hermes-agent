@@ -11,6 +11,7 @@ Run with:  python -m pytest tests/tools/test_file_staleness.py -v
 
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -19,6 +20,7 @@ from unittest.mock import patch, MagicMock
 from tools import file_state
 from tools.file_tools import read_file_tool, write_file_tool, patch_tool
 from tools.file_tools_read_tracking import _read_tracker, reset_file_dedup
+from tools.file_operations import ShellFileOperations
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,28 @@ def _make_fake_ops(read_content="hello\n", file_size=6):
     fake.write_file = lambda path, content: _FakeWriteResult()
     fake.patch_replace = lambda path, old, new, replace_all=False: _FakePatchResult()
     return fake
+
+
+def _real_shell_ops(cwd: str, path_map: tuple[str, str] | None = None,
+                    sha256sum_available: bool = True, backend_home: str | None = None,
+                    portable_only: bool = False):
+    env = MagicMock()
+    env.cwd = cwd
+
+    def execute(command, cwd=None, timeout=None, stdin_data=None):
+        if path_map is not None:
+            command = command.replace(*path_map)
+        if portable_only and command.startswith(("realpath -m ", "python3 -c ", "python -c ")):
+            return {"returncode": 127, "output": "command not found"}
+        if (portable_only or not sha256sum_available) and command.startswith("sha256sum "):
+            return {"returncode": 127, "output": "sha256sum: command not found"}
+        result = subprocess.run(command, shell=True, cwd=cwd, timeout=timeout,
+                                input=stdin_data, text=True, capture_output=True,
+                                env={**os.environ, "HOME": backend_home} if backend_home else None)
+        return {"returncode": result.returncode, "output": result.stdout}
+
+    env.execute.side_effect = execute
+    return ShellFileOperations(env)
 
 
 def _modify_externally(path: str, content: str) -> None:
@@ -123,6 +147,188 @@ class TestStalenessCheck(unittest.TestCase):
         self.assertNotIn("error", written)
         with open(self._tmpfile) as f:
             self.assertEqual(f.read(), "merged\n")
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_complete_shell_backend_read_allows_write_but_changed_file_does_not(self, mock_ops):
+        """The backend namespace supplies the read and version proof for writes."""
+        mock_ops.return_value = _real_shell_ops(self._tmpdir)
+        with open(self._tmpfile, "w") as stream:
+            stream.write("one\ntwo\nthree\n")
+
+        partial = json.loads(read_file_tool(self._tmpfile, limit=1, task_id="remote"))
+        self.assertTrue(partial["truncated"])
+        self.assertTrue(json.loads(write_file_tool(self._tmpfile, "stale\n", task_id="remote"))
+                        .get("stale_write_blocked"))
+        read = json.loads(read_file_tool(self._tmpfile, limit=10, task_id="remote"))
+        self.assertEqual(read["total_lines"], 3)
+        self.assertFalse(read["truncated"])
+        written = json.loads(write_file_tool(self._tmpfile, "merged\n", task_id="remote"))
+        self.assertNotIn("error", written, written)
+        with open(self._tmpfile) as stream:
+            self.assertEqual(stream.read(), "merged\n")
+
+        json.loads(read_file_tool(self._tmpfile, task_id="remote"))
+        _modify_externally(self._tmpfile, "changed elsewhere\n")
+        reset_file_dedup("remote")
+        refused = json.loads(write_file_tool(self._tmpfile, "stale\n", task_id="remote"))
+        self.assertTrue(refused.get("stale_write_blocked"), refused)
+        with open(self._tmpfile) as stream:
+            self.assertEqual(stream.read(), "changed elsewhere\n")
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_backend_only_existing_file_requires_current_full_read(self, mock_ops):
+        """A remote file with no host counterpart is still an existing file."""
+        remote_path = self._tmpfile + "-backend"
+        self.assertFalse(os.path.exists(remote_path))
+        mock_ops.return_value = _real_shell_ops(
+            self._tmpdir, (remote_path, self._tmpfile), portable_only=True)
+        with open(self._tmpfile, "w") as stream:
+            stream.write("one\ntwo\nthree\n")
+
+        partial = json.loads(read_file_tool(remote_path, limit=1, task_id="remote-only"))
+        self.assertTrue(partial["truncated"])
+        refused = json.loads(write_file_tool(remote_path, "stale\n", task_id="remote-only"))
+        self.assertTrue(refused.get("stale_write_blocked"), refused)
+
+        full = json.loads(read_file_tool(remote_path, task_id="remote-only"))
+        self.assertFalse(full["truncated"])
+        written = json.loads(write_file_tool(remote_path, "merged\n", task_id="remote-only"))
+        self.assertNotIn("error", written, written)
+        rewritten = json.loads(write_file_tool(remote_path, "merged again\n", task_id="remote-only"))
+        self.assertNotIn("error", rewritten, rewritten)
+
+        json.loads(read_file_tool(remote_path, task_id="remote-only"))
+        _modify_externally(self._tmpfile, "changed elsewhere\n")
+        refused = json.loads(write_file_tool(remote_path, "stale\n", task_id="remote-only"))
+        self.assertTrue(refused.get("stale_write_blocked"), refused)
+        with open(self._tmpfile) as stream:
+            self.assertEqual(stream.read(), "changed elsewhere\n")
+
+        new_remote = os.path.join(self._tmpdir, "portable-new-dir", "new.txt")
+        created = json.loads(write_file_tool(new_remote, "portable\n", task_id="portable-new"))
+        self.assertNotIn("error", created, created)
+        with open(new_remote) as stream:
+            self.assertEqual(stream.read(), "portable\n")
+        os.unlink(new_remote)
+        os.rmdir(os.path.dirname(new_remote))
+        missing_top = f"/__hermes_missing_{os.path.basename(self._tmpdir)}/file.txt"
+        self.assertEqual(mock_ops.return_value.resolve_backend_path(missing_top), missing_top)
+
+        remote_notebook = remote_path + ".ipynb"
+        backend_notebook = self._tmpfile + ".ipynb"
+        notebook = ('{"cells":[{"cell_type":"markdown","metadata":{},'
+                    '"source":["hello notebook"]}],"metadata":{},'
+                    '"nbformat":4,"nbformat_minor":5}')
+        with open(backend_notebook, "w") as stream:
+            stream.write(notebook)
+        mock_ops.return_value = _real_shell_ops(self._tmpdir, (remote_notebook, backend_notebook))
+        extracted = json.loads(read_file_tool(remote_notebook, task_id="remote-notebook"))
+        self.assertTrue(extracted["extracted_document"], extracted)
+        self.assertNotIn("error", json.loads(write_file_tool(
+            remote_notebook, notebook.replace("hello notebook", "updated notebook"),
+            task_id="remote-notebook")))
+        with open(backend_notebook) as stream:
+            self.assertIn("updated notebook", stream.read())
+        os.unlink(backend_notebook)
+
+        from tools import terminal_tool
+        workspace = os.path.join(self._tmpdir, "workspace")
+        decoy = os.path.join(self._tmpdir, "backend-cwd")
+        os.makedirs(workspace)
+        os.makedirs(decoy)
+        workspace_file = os.path.join(workspace, "target.txt")
+        decoy_file = os.path.join(decoy, "target.txt")
+        with open(workspace_file, "w") as stream:
+            stream.write("workspace version\n")
+        with open(decoy_file, "w") as stream:
+            stream.write("backend cwd version\n")
+        mock_ops.return_value = _real_shell_ops(decoy)
+        fresh = json.loads(read_file_tool("target.txt", task_id="remote-first-read"))
+        self.assertIn("backend cwd version", fresh["content"])
+        terminal_tool.record_session_cwd("remote-relative", workspace)
+        try:
+            read = json.loads(read_file_tool("target.txt", task_id="remote-relative"))
+            self.assertIn("workspace version", read["content"])
+            written = json.loads(write_file_tool("target.txt", "updated\n", task_id="remote-relative"))
+            self.assertNotIn("error", written, written)
+        finally:
+            terminal_tool.clear_session_cwd("remote-relative")
+        with open(workspace_file) as stream:
+            self.assertEqual(stream.read(), "updated\n")
+        with open(decoy_file) as stream:
+            self.assertEqual(stream.read(), "backend cwd version\n")
+        os.unlink(workspace_file)
+        os.unlink(decoy_file)
+        os.rmdir(workspace)
+        os.rmdir(decoy)
+
+        backend_home = os.path.join(self._tmpdir, "backend-home")
+        os.makedirs(backend_home)
+        home_file = os.path.join(backend_home, "prefs.txt")
+        with open(home_file, "w") as stream:
+            stream.write("remote home\n")
+        mock_ops.return_value = _real_shell_ops(self._tmpdir, backend_home=backend_home)
+        self.assertIn("remote home", json.loads(read_file_tool("~/prefs.txt", task_id="remote-home"))["content"])
+        self.assertNotIn("error", json.loads(write_file_tool("~/prefs.txt", "updated home\n", task_id="remote-home")))
+        with open(home_file) as stream:
+            self.assertEqual(stream.read(), "updated home\n")
+        ssh_dir = os.path.join(backend_home, ".ssh")
+        os.mkdir(ssh_dir)
+        ssh_key = os.path.join(ssh_dir, "authorized_keys")
+        ssh_config = os.path.join(ssh_dir, "config")
+        for guarded_path in ("~/.ssh/authorized_keys", ssh_key, "~/.ssh/config", ssh_config):
+            denied = json.loads(write_file_tool(guarded_path, "unsafe\n", task_id="remote-home"))
+            self.assertIn("error", denied, denied)
+        self.assertFalse(os.path.exists(ssh_key))
+        self.assertFalse(os.path.exists(ssh_config))
+        with open(ssh_key, "w") as stream:
+            stream.write("old key\n")
+        remote_link = os.path.join(self._tmpdir, "innocent-link.txt")
+        os.symlink(ssh_key, remote_link)
+        linked_read = json.loads(read_file_tool(remote_link, task_id="remote-home"))
+        self.assertIn("old key", linked_read["content"])
+        linked_write = json.loads(write_file_tool(remote_link, "unsafe\n", task_id="remote-home"))
+        self.assertIn("error", linked_write, linked_write)
+        with open(ssh_key) as stream:
+            self.assertEqual(stream.read(), "old key\n")
+        os.unlink(remote_link)
+        os.unlink(ssh_key)
+        os.symlink(home_file, ssh_config)
+        self.assertIn("error", json.loads(write_file_tool(
+            "~/.ssh/config", "unsafe\n", task_id="remote-home")))
+        with open(home_file) as stream:
+            self.assertEqual(stream.read(), "updated home\n")
+        os.unlink(ssh_config)
+        hermes_dir = os.path.join(backend_home, ".hermes")
+        os.mkdir(hermes_dir)
+        auth_file = os.path.join(hermes_dir, "auth.json")
+        with open(auth_file, "w") as stream:
+            stream.write('{"token":"secret"}\n')
+        auth_link = os.path.join(self._tmpdir, "innocent-auth.txt")
+        os.symlink(auth_file, auth_link)
+        for guarded_path in ("~/.hermes/auth.json", auth_file, auth_link):
+            denied = json.loads(read_file_tool(guarded_path, task_id="remote-home"))
+            self.assertIn("error", denied, denied)
+            self.assertNotIn("secret", denied.get("content", ""))
+        os.unlink(auth_link)
+        os.unlink(auth_file)
+        os.rmdir(hermes_dir)
+        os.rmdir(ssh_dir)
+        os.unlink(home_file)
+        os.rmdir(backend_home)
+
+        backend_file = os.path.join(self._tmpdir, "backend-file.txt")
+        host_link = os.path.join(self._tmpdir, "linked.txt")
+        with open(backend_file, "w") as stream:
+            stream.write("backend file\n")
+        os.symlink("/etc/passwd", host_link)
+        mock_ops.return_value = _real_shell_ops(self._tmpdir, (host_link, backend_file))
+        self.assertIn("backend file", json.loads(read_file_tool(host_link, task_id="remote-link"))["content"])
+        self.assertNotIn("error", json.loads(write_file_tool(host_link, "updated file\n", task_id="remote-link")))
+        with open(backend_file) as stream:
+            self.assertEqual(stream.read(), "updated file\n")
+        os.unlink(host_link)
+        os.unlink(backend_file)
 
     def test_write_file_requires_full_unredacted_read_of_existing_file(self):
         """Existing file with no baseline is refused untouched: never read, only

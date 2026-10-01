@@ -142,7 +142,8 @@ def _resolved_or_raw(filepath: str, task_id: str) -> str:
         return filepath
 
 
-def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
+def _check_sensitive_path(filepath: str, task_id: str = "default",
+                          *, backend_resolved: bool = False) -> str | None:
     """Return an error message if the path targets a sensitive system location."""
     # NT/device-namespace guard on the RAW string, BEFORE the task-base join:
     # on POSIX a leading "\??\" reads as a relative segment and gets anchored
@@ -152,7 +153,8 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     nt_err = get_nt_namespace_error(filepath, verb="Write")
     if nt_err:
         return nt_err
-    candidates = (_resolved_or_raw(filepath, task_id), os.path.normpath(_expand_tilde(filepath)))
+    candidates = ((filepath,) if backend_resolved else
+                  (_resolved_or_raw(filepath, task_id), os.path.normpath(_expand_tilde(filepath))))
     if any(c.startswith(_SENSITIVE_PATH_PREFIXES) or c in _SENSITIVE_EXACT_PATHS for c in candidates):
         return (
             f"Refusing to write to sensitive system path: {filepath}\n"
@@ -420,7 +422,8 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     return get_container_mirror_warning(resolved, mirror_prefix=_get_container_mirror_prefix_for_task(task_id))
 
 
-def _check_binary_document_write(filepath: str, task_id: str = "default") -> str | None:
+def _check_binary_document_write(filepath: str, task_id: str = "default",
+                                 *, backend_file_ops=None, backend_path: str | None = None) -> str | None:
     """Reject text-tool writes that would corrupt a binary document (read_file showed
     EXTRACTED text, so the model may write it back). Opaque document formats and
     SQLite sidecars (-wal/-shm/-journal) are always rejected; .pdf and every other
@@ -457,28 +460,34 @@ def _check_binary_document_write(filepath: str, task_id: str = "default") -> str
     # syntax is text-authorable and text fixtures named ``*.db`` exist.
     pdf = is_pdf_path(filepath)
     if pdf or has_binary_extension(filepath):
-        try:
-            resolved = Path(_resolve_path_for_task(filepath, task_id))
-        except Exception:
-            resolved = Path(_expand_tilde(filepath))
-        try:
-            if resolved.is_file():
-                if pdf:
-                    return (
-                        f"Refusing to overwrite existing PDF '{filepath}' with plain text. "
-                        "read_file showed you EXTRACTED text, not the real bytes — writing "
-                        "text back would destroy the document. Use the pdf skill or a PDF "
-                        "library via the terminal to modify it. (Creating a NEW .pdf file "
-                        "is allowed.)")
+        if backend_file_ops is not None:
+            # Unknown backend existence fails closed for an extension whose
+            # existing bytes a plain text write would corrupt.
+            existing = backend_file_ops.path_exists(backend_path or filepath) is not False
+        else:
+            try:
+                resolved = Path(_resolve_path_for_task(filepath, task_id))
+            except Exception:
+                resolved = Path(_expand_tilde(filepath))
+            try:
+                existing = resolved.is_file()
+            except OSError:
+                existing = False
+        if existing:
+            if pdf:
                 return (
-                    f"Refusing to overwrite existing binary file '{filepath}' ({ext}) "
-                    "with plain text — read_file showed you extracted or mojibake "
-                    "text, not the real bytes, and writing text back would destroy "
-                    "the file. Use a binary-aware tool via the terminal to modify it "
-                    "(for SQLite databases, the sqlite3 CLI or a SQLite library). "
-                    "(Creating a NEW file with this extension is allowed.)")
-        except OSError:
-            pass
+                    f"Refusing to overwrite existing PDF '{filepath}' with plain text. "
+                    "read_file showed you EXTRACTED text, not the real bytes — writing "
+                    "text back would destroy the document. Use the pdf skill or a PDF "
+                    "library via the terminal to modify it. (Creating a NEW .pdf file "
+                    "is allowed.)")
+            return (
+                f"Refusing to overwrite existing binary file '{filepath}' ({ext}) "
+                "with plain text — read_file showed you extracted or mojibake "
+                "text, not the real bytes, and writing text back would destroy "
+                "the file. Use a binary-aware tool via the terminal to modify it "
+                "(for SQLite databases, the sqlite3 CLI or a SQLite library). "
+                "(Creating a NEW file with this extension is allowed.)")
     return None
 
 
@@ -501,20 +510,27 @@ def _stale_overwrite_blocker(filepath: str, resolved: str | None, task_id: str) 
     """
     if file_state.guard_disabled():
         return None
-    stale = file_state.check_stale(task_id, resolved) if resolved else None
+    from tools.file_tools import _file_ops_uses_host_paths, _get_file_ops
+    file_ops = _get_file_ops(task_id)
+    host_paths = _file_ops_uses_host_paths(file_ops)
+    stale = file_state.check_stale(task_id, resolved) if resolved and host_paths else None
     if stale:
         return stale
-    if _read_mtime_drifted(filepath, task_id):
+    if host_paths and _read_mtime_drifted(filepath, task_id):
         return (
             f"{filepath} was modified since you last read it (external edit or "
             "concurrent agent). Re-read the file before writing.")
-    if not resolved or _has_full_write_baseline(resolved, task_id):
+    if not resolved or _has_full_write_baseline(
+            resolved, task_id, file_ops=None if host_paths else file_ops):
         return None
-    try:
-        exists = Path(resolved).exists()
-    except OSError:
-        return None
-    if not exists:
+    if host_paths:
+        try:
+            exists = Path(resolved).exists()
+        except OSError:
+            exists = None
+    else:
+        exists = file_ops.path_exists(resolved)
+    if exists is False:
         return None
     return (
         f"{resolved} exists but this task has not seen its full current content "

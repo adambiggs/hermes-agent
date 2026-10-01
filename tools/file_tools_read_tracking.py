@@ -177,7 +177,10 @@ def reset_file_dedup(task_id: str = None):
         candidates = [(task_data, dict(task_data.get("full_write_baselines", {})))
                       for task_data in targets]
     for task_data, baselines in candidates:
-        changed = {p for p, version in baselines.items() if _file_metadata(p) != version[:-1]}
+        # Remote versions are checked through their backend at write time. A
+        # host stat here would describe a different namespace (or no file).
+        changed = {p for p, version in baselines.items()
+                   if version[0] != "backend-sha256" and _file_metadata(p) != version[:-1]}
         if changed:
             with _read_tracker_lock:
                 for p in changed:
@@ -271,24 +274,40 @@ def _file_version(resolved: str) -> tuple | None:
         return None
 
 
-def _mark_full_write_baseline(resolved: str, task_id: str, expected_sha256: str | None = None) -> None:
+def _mark_full_write_baseline(resolved: str, task_id: str, expected_sha256: str | None = None,
+                              file_ops=None) -> None:
     """Record that *task_id* saw the whole current content of *resolved* (full
     unredacted read_file, or its own successful write_file), so a later
     write_file may replace the file. Acquires the lock itself."""
-    version = _file_version(resolved)
-    if version is None or (expected_sha256 is not None and version[-1].hex() != expected_sha256):
-        return
+    if file_ops is not None:
+        if expected_sha256 is None:
+            return
+        disk_sha = file_ops.file_sha256(resolved)
+        if disk_sha != expected_sha256:
+            return
+        version = ("backend-sha256", disk_sha)
+    else:
+        version = _file_version(resolved)
+        if version is None or (expected_sha256 is not None and version[-1].hex() != expected_sha256):
+            return
     with _read_tracker_lock:
         task_data = _task_data(task_id)
         task_data["full_write_baselines"][str(resolved)] = version
         _cap_read_tracker_data(task_data)
 
 
-def _has_full_write_baseline(resolved: str, task_id: str) -> bool:
+def _has_full_write_baseline(resolved: str, task_id: str, file_ops=None) -> bool:
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id) or {}
         baseline = task_data.get("full_write_baselines", {}).get(str(resolved))
-    return baseline is not None and _file_version(resolved) == baseline
+    if baseline is None:
+        return False
+    if file_ops is not None:
+        return (baseline[0] == "backend-sha256"
+                and file_ops.file_sha256(resolved) == baseline[1])
+    if baseline[0] == "backend-sha256":
+        return False
+    return _file_version(resolved) == baseline
 
 
 _READ_COVERAGE_RANGES_CAP = 256

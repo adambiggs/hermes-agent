@@ -10,6 +10,7 @@ implementation serves every environment (local, docker, ssh, modal, ...). Compan
 import base64
 import binascii
 import os
+import posixpath
 import re
 import sys
 import difflib
@@ -105,7 +106,8 @@ class FileOperations(ABC):
         """Whole file as a plain string: no pagination, line numbers or clamping."""
 
     @abstractmethod
-    def write_file(self, path: str, content: str, pre_content: Optional[str] = None) -> WriteResult:
+    def write_file(self, path: str, content: str, pre_content: Optional[str] = None,
+                   *, backend_guarded: bool = False) -> WriteResult:
         """Write content to a file, creating directories as needed."""
 
     @abstractmethod
@@ -1035,6 +1037,125 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         raw_content, _ = _strip_bom(_strip_terminal_fence_leaks(cat_result.stdout))
         return ReadResult(content=raw_content, file_size=file_size)
 
+    def file_sha256(self, path: str) -> Optional[str]:
+        """Hash a file in the terminal backend's namespace, if supported."""
+        path = self._expand_path(path)
+        quoted = self._escape_shell_arg(path)
+        for command in (f"sha256sum {quoted}", f"shasum -a 256 {quoted}",
+                        f"openssl dgst -sha256 {quoted}"):
+            try:
+                result = self._exec(command)
+            except OSError:
+                continue
+            output = _strip_terminal_fence_leaks(result.stdout or "").strip()
+            digest = output.split(maxsplit=1)[0] if output else ""
+            if result.exit_code == 0:
+                if re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                    return digest.lower()
+                digest = output.rsplit(maxsplit=1)[-1] if output else ""
+                if re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                    return digest.lower()
+        # Python remains a final fallback for targets without a digest utility.
+        snippet = (
+            "import hashlib, pathlib\n"
+            f"stream = pathlib.Path({path!r}).open('rb')\n"
+            "digest = hashlib.sha256()\n"
+            "with stream:\n"
+            "    for chunk in iter(lambda: stream.read(1048576), b''):\n"
+            "        digest.update(chunk)\n"
+            "print(digest.hexdigest())\n")
+        try:
+            result = self._run_python_snippet(snippet)
+        except OSError:
+            return None
+        digest = _strip_terminal_fence_leaks(result.stdout or "").strip()
+        return digest.lower() if result.exit_code == 0 and re.fullmatch(r"[0-9a-fA-F]{64}", digest) else None
+
+    def resolve_backend_path(self, path: str, cwd: str = None,
+                             *, follow_symlinks: bool = True) -> Optional[str]:
+        """Resolve a path and its symlinks in the backend namespace."""
+        expanded = self._expand_path(path)
+        if expanded.startswith("~"):
+            return None
+        if not posixpath.isabs(expanded):
+            if not cwd:
+                try:
+                    result = self._exec("pwd -P")
+                except OSError:
+                    return None
+                cwd = _strip_terminal_fence_leaks(result.stdout or "").strip()
+                if result.exit_code != 0:
+                    return None
+            if not posixpath.isabs(cwd) or "\n" in cwd:
+                return None
+            expanded = posixpath.join(cwd, expanded)
+        if not follow_symlinks:
+            return posixpath.normpath(expanded)
+        try:
+            result = self._exec(f"realpath -m -- {self._escape_shell_arg(expanded)}")
+        except OSError:
+            result = None
+        if result is not None:
+            resolved = _strip_terminal_fence_leaks(result.stdout or "").strip()
+            if result.exit_code == 0 and posixpath.isabs(resolved) and "\n" not in resolved:
+                return resolved
+        try:
+            result = self._exec(f"realpath {self._escape_shell_arg(expanded)}")
+        except OSError:
+            result = None
+        if result is not None:
+            resolved = _strip_terminal_fence_leaks(result.stdout or "").strip()
+            if result.exit_code == 0 and posixpath.isabs(resolved) and "\n" not in resolved:
+                return resolved
+        try:
+            result = self._run_python_snippet(
+                f"import os; print(os.path.realpath({expanded!r}))")
+        except OSError:
+            result = None
+        if result is not None:
+            resolved = _strip_terminal_fence_leaks(result.stdout or "").strip()
+            if result.exit_code == 0 and posixpath.isabs(resolved) and "\n" not in resolved:
+                return resolved
+        # POSIX shell fallback: resolve the longest existing directory in the
+        # backend, then append the remaining path. Existing symlinks need a
+        # realpath/readlink implementation; without one we fail closed.
+        quoted = self._escape_shell_arg(expanded)
+        script = (
+            f"p={quoted}; rest=; "
+            'while [ ! -e "$p" ] && [ ! -L "$p" ]; do '
+            'b=${p##*/}; p=${p%/*}; [ -n "$p" ] || p=/; rest="/$b$rest"; '
+            'done; '
+            'if [ -L "$p" ]; then '
+            'p="$(readlink -f "$p")" || exit 1; [ -n "$p" ] || exit 1; fi; '
+            'if [ -d "$p" ]; then cd -P "$p" || exit 1; pwd -P; '
+            'else d=${p%/*}; b=${p##*/}; [ -n "$d" ] || d=/; '
+            'cd -P "$d" || exit 1; printf "%s/%s\n" "$(pwd -P)" "$b"; fi; '
+            'printf "__HERMES_REST__%s\n" "$rest"')
+        try:
+            result = self._exec(script)
+        except OSError:
+            return None
+        output = _strip_terminal_fence_leaks(result.stdout or "").splitlines()
+        if result.exit_code != 0 or len(output) != 2 or not output[1].startswith("__HERMES_REST__"):
+            return None
+        rest = output[1][len("__HERMES_REST__"):]
+        resolved = posixpath.normpath(posixpath.join(output[0], rest.lstrip("/")))
+        return resolved if posixpath.isabs(resolved) else None
+
+    def path_exists(self, path: str) -> Optional[bool]:
+        """Check existence in the backend namespace; None means no reliable answer."""
+        path = self._expand_path(path)
+        try:
+            result = self._exec(
+                f"if test -e {self._escape_shell_arg(path)}; then printf exists; "
+                "else printf missing; fi")
+        except OSError:
+            return None
+        answer = _strip_terminal_fence_leaks(result.stdout or "").strip()
+        if result.exit_code == 0 and answer in ("exists", "missing"):
+            return answer == "exists"
+        return None
+
     def read_file_bytes(self, path: str, max_bytes: Optional[int] = None) -> ReadResult:
         """Read binary-safe bytes (as base64) from any shell-backed environment."""
         path = self._expand_path(path)
@@ -1250,7 +1371,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             pass
         return None, None
 
-    def write_file(self, path: str, content: str, pre_content: Optional[str] = None) -> WriteResult:
+    def write_file(self, path: str, content: str, pre_content: Optional[str] = None,
+                   *, backend_guarded: bool = False) -> WriteResult:
         """Write content atomically, creating parent directories as needed.
 
         Order: deny list → lone-surrogate refusal → fail-closed syntax gate on the
@@ -1262,7 +1384,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         caller already has (skips the read); BOM detection always probes disk.
         """
         path = self._expand_path(path)
-        denied = get_write_denied_error(path)
+        denied = None if backend_guarded else get_write_denied_error(path)
         if denied:
             return WriteResult(error=denied)
         refused = self._reject_unencodable(path, content)
