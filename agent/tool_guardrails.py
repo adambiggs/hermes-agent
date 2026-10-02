@@ -244,7 +244,7 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
 _DECISION_MESSAGES: dict[str, str] = {
     "repeated_exact_failure_block": (
         "Blocked {tool_name}: the same tool call failed {count} times with identical arguments. "
-        "Stop retrying it unchanged; change strategy or explain the blocker."
+        "Stop retrying it unchanged; fix the call if it was wrong, otherwise report the blocker."
     ),
     "idempotent_no_progress_block": (
         "Blocked {tool_name}: this read-only call returned the same result {count} times. "
@@ -252,11 +252,12 @@ _DECISION_MESSAGES: dict[str, str] = {
     ),
     "same_tool_failure_halt": (
         "Stopped {tool_name}: it failed {count} times this turn. "
-        "Stop retrying the same failing tool path and choose a different approach."
+        "Stop retrying the same failing tool path; fix the call if it was wrong, otherwise report the blocker "
+        "and continue the work it does not affect."
     ),
     "repeated_exact_failure_warning": (
         "{tool_name} has failed {count} times with identical arguments. This looks like a loop; "
-        "inspect the error and change strategy instead of retrying it unchanged."
+        "inspect the error: fix the call if it was wrong, otherwise report the blocker instead of retrying it unchanged."
     ),
     "idempotent_no_progress_warning": (
         "{tool_name} returned the same result {count} times. Use the result already provided "
@@ -583,7 +584,9 @@ def _tool_failure_recovery_hint(tool_name: str, count: int) -> str:
         return common + (
             "For terminal failures, run a small diagnostic such as `pwd && ls -la` "
             "in the same tool, then try an absolute path, a simpler command, a different "
-            "working directory, or a different tool such as read_file/write_file/patch."
+            "working directory, or a different tool such as read_file/write_file/patch. "
+            "If the blocker is external, report the blocker after one diagnostic attempt "
+            "instead of repeating the same failing path."
         )
     return common + (
         "Try different arguments, a narrower query/path, an absolute path when relevant, "
