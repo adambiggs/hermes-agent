@@ -13,7 +13,7 @@ metadata:
 
 # Product Price Monitor
 
-Monitor a concrete purchasable item and alert on a normalized all-in price or availability condition. Handle variants, taxes, fees, currencies, stock, cancellation terms, and duplicate alerts explicitly. Setup runs once in the foreground; the recurring check runs as a `cronjob` tick (the `price-watch` automation blueprint scaffolds this).
+Monitor a concrete purchasable item and alert on a normalized all-in price or availability condition. Handle variants, taxes, fees, currencies, stock, cancellation terms, and duplicate alerts explicitly. Setup runs once in the foreground; the recurring check runs as a `cronjob_manage` tick (the `price-watch` automation blueprint scaffolds this).
 
 ## When to Use
 
@@ -40,7 +40,7 @@ Specify currency, all-in vs pre-tax price, maximum price, availability/stock rul
 Fetch a bounded live result with `web_extract` or `browser_navigate` and record retrieval time, source price, fees/taxes, availability, and terms. Do not schedule until one foreground fetch works. Write the watch contract (item, condition, baseline observation) to a state file under `~/.hermes/price-watches/<watch-slug>.json`, then create the job:
 
 ```
-cronjob(action="create",
+cronjob_manage(action="create",
         schedule="every 6h",
         prompt="Load the product-price-monitor skill and run the tick for the watch contract at ~/.hermes/price-watches/<watch-slug>.json.",
         deliver=<user's destination>)

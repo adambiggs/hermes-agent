@@ -13,7 +13,7 @@ metadata:
 
 # OpenCode CLI
 
-Use [OpenCode](https://opencode.ai) as an autonomous coding worker orchestrated by Hermes terminal/process tools. OpenCode is a provider-agnostic, open-source AI coding agent with a TUI and CLI.
+Use [OpenCode](https://opencode.ai) as an autonomous coding worker orchestrated by Hermes terminal/process_manage tools. OpenCode is a provider-agnostic, open-source AI coding agent with a TUI and CLI.
 
 ## When to Use
 
@@ -80,22 +80,22 @@ terminal(command="opencode", workdir="~/project", background=true, pty=true)
 # Returns session_id
 
 # Send a prompt
-process(action="submit", session_id="<id>", data="Implement OAuth refresh flow and add tests")
+process_manage(action="submit", session_id="<id>", data="Implement OAuth refresh flow and add tests")
 
 # Monitor progress
-process(action="poll", session_id="<id>")
-process(action="log", session_id="<id>")
+process_manage(action="poll", session_id="<id>")
+process_manage(action="log", session_id="<id>")
 
 # Send follow-up input
-process(action="submit", session_id="<id>", data="Now add error handling for token expiry")
+process_manage(action="submit", session_id="<id>", data="Now add error handling for token expiry")
 
 # Exit cleanly — Ctrl+C
-process(action="write", session_id="<id>", data="\x03")
+process_manage(action="write", session_id="<id>", data="\x03")
 # Or just kill the process
-process(action="kill", session_id="<id>")
+process_manage(action="kill", session_id="<id>")
 ```
 
-**Important:** Do NOT use `/exit` — it is not a valid OpenCode command and will open an agent selector dialog instead. Use Ctrl+C (`\x03`) or `process(action="kill")` to exit.
+**Important:** Do NOT use `/exit` — it is not a valid OpenCode command and will open an agent selector dialog instead. Use Ctrl+C (`\x03`) or `process_manage(action="kill")` to exit.
 
 ### TUI Keybindings
 
@@ -142,9 +142,9 @@ terminal(command="opencode -s ses_abc123", workdir="~/project", background=true,
    - `terminal(command="opencode auth list")`
 2. For bounded tasks, use `opencode run '...'` (no pty needed).
 3. For iterative tasks, start `opencode` with `background=true, pty=true`.
-4. Monitor long tasks with `process(action="poll"|"log")`.
-5. If OpenCode asks for input, respond via `process(action="submit", ...)`.
-6. Exit with `process(action="write", data="\x03")` or `process(action="kill")`.
+4. Monitor long tasks with `process_manage(action="poll"|"log")`.
+5. If OpenCode asks for input, respond via `process_manage(action="submit", ...)`.
+6. Exit with `process_manage(action="write", data="\x03")` or `process_manage(action="kill")`.
 7. Summarize file changes, test results, and next steps back to user.
 
 ## PR Review Workflow
@@ -168,7 +168,7 @@ Use separate workdirs/worktrees to avoid collisions:
 ```
 terminal(command="opencode run 'Fix issue #101 and commit'", workdir="~/.hermes/cache/scratch/issue-101", background=true, pty=true)
 terminal(command="opencode run 'Add parser regression tests and commit'", workdir="~/.hermes/cache/scratch/issue-102", background=true, pty=true)
-process(action="list")
+process_manage(action="list")
 ```
 
 ## Session & Cost Management
@@ -192,7 +192,7 @@ terminal(command="opencode stats --days 7 --models anthropic/claude-sonnet-4")
 - `/exit` is NOT a valid command — it opens an agent selector. Use Ctrl+C to exit the TUI.
 - PATH mismatch can select the wrong OpenCode binary/model config.
 - If OpenCode appears stuck, inspect logs before killing:
-  - `process(action="log", session_id="<id>")`
+  - `process_manage(action="log", session_id="<id>")`
 - Avoid sharing one working directory across parallel OpenCode sessions.
 - Enter may need to be pressed twice to submit in the TUI (once to finalize text, once to send).
 
@@ -214,6 +214,6 @@ Success criteria:
 1. Prefer `opencode run` for one-shot automation — it's simpler and doesn't need pty.
 2. Use interactive background mode only when iteration is needed.
 3. Always scope OpenCode sessions to a single repo/workdir.
-4. For long tasks, provide progress updates from `process` logs.
+4. For long tasks, provide progress updates from `process_manage` logs.
 5. Report concrete outcomes (files changed, tests, remaining risks).
 6. Exit interactive sessions with Ctrl+C or kill, never `/exit`.

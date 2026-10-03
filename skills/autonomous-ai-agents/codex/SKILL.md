@@ -57,14 +57,14 @@ terminal(command="codex exec --sandbox workspace-write 'Refactor the auth module
 # Returns session_id
 
 # Monitor progress
-process(action="poll", session_id="<id>")
-process(action="log", session_id="<id>")
+process_manage(action="poll", session_id="<id>")
+process_manage(action="log", session_id="<id>")
 
 # Send input if Codex asks a question
-process(action="submit", session_id="<id>", data="yes")
+process_manage(action="submit", session_id="<id>", data="yes")
 
 # Kill if needed
-process(action="kill", session_id="<id>")
+process_manage(action="kill", session_id="<id>")
 ```
 
 ## Key Flags
@@ -116,7 +116,7 @@ terminal(command="codex --sandbox workspace-write exec 'Fix issue #78: <descript
 terminal(command="codex --sandbox workspace-write exec 'Fix issue #99: <description>. Commit when done.'", workdir="~/.hermes/cache/scratch/issue-99", background=true, pty=true)
 
 # Monitor
-process(action="list")
+process_manage(action="list")
 
 # After completion, push and create PRs
 terminal(command="cd ~/.hermes/cache/scratch/issue-78 && git push -u origin fix/issue-78")
@@ -146,6 +146,6 @@ terminal(command="gh pr comment 86 --body '<review>'", workdir="~/project")
 2. **Git repo required** — Codex won't run outside a git directory. Use `mktemp -d && git init` for scratch
 3. **Use `exec` for one-shots** — `codex exec "prompt"` runs and exits cleanly
 4. **`--sandbox workspace-write` for building** — auto-approves changes within the sandbox (`--full-auto` is deprecated for this)
-5. **Background for long tasks** — use `background=true` and monitor with `process` tool
+5. **Background for long tasks** — use `background=true` and monitor with `process_manage` tool
 6. **Don't interfere** — monitor with `poll`/`log`, be patient with long-running tasks
 7. **Parallel is fine** — run multiple Codex processes at once for batch work

@@ -13,7 +13,7 @@ metadata:
 
 # Competitor News Monitor
 
-Track a declared company set and report only material, new developments with primary-source evidence. This is not a generic page-diff watcher: it applies company-news categories, source hierarchy, event deduplication, and business significance. Setup runs once in the foreground; the recurring check runs as a `cronjob` tick (the `competitor-watch` automation blueprint scaffolds this).
+Track a declared company set and report only material, new developments with primary-source evidence. This is not a generic page-diff watcher: it applies company-news categories, source hierarchy, event deduplication, and business significance. Setup runs once in the foreground; the recurring check runs as a `cronjob_manage` tick (the `competitor-watch` automation blueprint scaffolds this).
 
 ## When to Use
 
@@ -45,7 +45,7 @@ For each company include, where available:
 Use `rss-feeds` (optional) or `blogwatcher` (optional, stateful) for feeds, `reddit-reading` for community discussion, and `web_search`/`web_extract` for pages. Write the watch contract (watchlist, categories, materiality threshold, last cutoff) to a state file under `~/.hermes/competitor-watches/<watch-slug>.json`, then create the job:
 
 ```
-cronjob(action="create",
+cronjob_manage(action="create",
         schedule="every monday 9am",
         prompt="Load the competitor-news-monitor skill and run the tick for the watch contract at ~/.hermes/competitor-watches/<watch-slug>.json.",
         deliver=<user's destination>)

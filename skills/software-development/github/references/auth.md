@@ -149,7 +149,7 @@ If `gh` is installed, it handles both API access and git credentials in one step
 
 ### Interactive Browser Login (Desktop)
 
-> **PITFALL (agent-driven sessions on Windows):** when driving `gh auth login` through a pty background process, answer prompts with `process(submit)` — never `process(write)` with a bare `\n`. Enter on a Windows PTY (ConPTY/pywinpty) is a carriage return; a lone `\n` is not delivered as a line terminator, so gh's "Press Enter to open the browser" prompt (a blocking line read) silently never returns and the login hangs. Also note the browser may not open on the user's desktop from a background session — if they report that, fall back to the device flow below.
+> **PITFALL (agent-driven sessions on Windows):** when driving `gh auth login` through a pty background process, answer prompts with `process_manage(submit)` — never `process_manage(write)` with a bare `\n`. Enter on a Windows PTY (ConPTY/pywinpty) is a carriage return; a lone `\n` is not delivered as a line terminator, so gh's "Press Enter to open the browser" prompt (a blocking line read) silently never returns and the login hangs. Also note the browser may not open on the user's desktop from a background session — if they report that, fall back to the device flow below.
 
 ```bash
 gh auth login
