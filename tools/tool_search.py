@@ -261,12 +261,12 @@ def _search_description(deferred_count: int, listing: Optional[str], listing_for
     desc += (
         "\n\nEvery deferred capability is listed below. If a tool name "
         "appears here, do NOT claim it is unavailable — load it with "
-        f"`{TOOL_DESCRIBE_NAME}` (skip `{TOOL_SEARCH_NAME}` when you "
+        f"`{TOOL_DESCRIBE_NAME}` (skip this search when you "
         "already see the exact name).")
     if listing_form == "mixed":
         desc += (
             " For servers marked 'names not listed', the tools exist "
-            f"too — find them with `{TOOL_SEARCH_NAME}` before "
+            "too — find them with this search before "
             "concluding anything is missing.")
     return desc + "\n\n" + listing
 
@@ -295,14 +295,14 @@ def bridge_tool_schemas(deferred_count: int, listing: Optional[str] = None,
         ),
         _bridge_schema(
             TOOL_DESCRIBE_NAME,
-            f"Load the full JSON schemas for tools returned by `{TOOL_SEARCH_NAME}`. "
+            "Load the full JSON schemas for tools returned by the tool search. "
             f"Required before `{TOOL_CALL_NAME}` if a tool's parameters are unknown. "
             "Batch every schema you need into one call.",
             {
                 "names": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Exact tool names (as returned by tool_search). A single string is accepted and treated as one name.",
+                    "description": "Exact tool names (as returned by the tool search). A single string is accepted and treated as one name.",
                 },
             },
             ["names"],
@@ -475,7 +475,7 @@ def dispatch_tool_search(args: Dict[str, Any], *, current_tool_defs: List[Dict[s
             group["hint"] = (
                 "This query returned no lexical matches, but the sources above "
                 "are connected and their tools remain available. Retry "
-                "tool_search with the service name plus a concrete action or "
+                "the search with the service name plus a concrete action or "
                 "object before concluding the capability is unavailable.")
         results.append(group)
     remote_count = sum(1 for name in tools_map if is_connector_name(name))
@@ -498,6 +498,7 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
     deferrable = _deferrable_in(current_tool_defs)
     by_name = {name: _fn(td) for td, name in zip(deferrable, _tool_def_names(deferrable)) if name}
     remote_schemas, hosted_failure = remote_schemas_for(names, current_tool_defs, connector_describe)
+    session_names = frozenset(n for n in _tool_def_names(current_tool_defs) if n)
 
     tools: Dict[str, Dict[str, Any]] = {}
     not_found: List[str] = []
@@ -514,16 +515,17 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
                            "parameters": remote_fn.get("parameters", {})}
         elif is_connector_name(name):
             (undescribed if hosted_failure else not_found).append(name)
-        elif _registry_entry(name) is not None and not is_deferrable_tool_name(
+        elif name in session_names and _registry_entry(name) is not None and not is_deferrable_tool_name(
             name, load_config_readonly().effective_defer_tools):
-            # Registered but bridge/core/GUI-surface: a real name, wrong door.
+            # In this session but bridge/core/GUI-surface: a real name, wrong door.
+            # A registered tool outside the session is not_found, like any absent name.
             errors[name] = not_deferrable_error(name)
         else:
             not_found.append(name)
     result: Dict[str, Any] = {"tools": tools}
     if not_found:
         result["not_found"] = not_found
-        result["hint"] = "Names in not_found are not currently available. Re-run tool_search to refresh."
+        result["hint"] = "Names in not_found are not currently available. Re-run the tool search to refresh."
     if errors:
         result["errors"] = errors
     if hosted_failure:
@@ -540,7 +542,8 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
                      if n and is_deferrable_tool_name(n, defer_tools))
 
 
-def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
+def resolve_underlying_call(args: Dict[str, Any], *, session_names: Optional[Iterable[str]] = None,
+                            ) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
     """Parse a ``tool_call`` invocation into (underlying_name, args, error_msg).
 
     Used by:
@@ -554,7 +557,8 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
     sentinel is what planners/display layers see. A single local entry keeps
     the historical single-tool contract unchanged.
 
-    On parse error, returns ``(None, {}, error_message)``.
+    On parse error, returns ``(None, {}, error_message)``. ``session_names`` scopes the
+    not-deferred rejection to the session's tools (see ``not_deferrable_error``).
     """
     entries, err = normalize_tool_call_entries(args)
     if err:
@@ -568,7 +572,7 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
     name = entries[0]["name"]
     raw_args = entries[0]["arguments"]
     if not is_deferrable_tool_name(name, load_config_readonly().effective_defer_tools):
-        return None, {}, not_deferrable_error(name)
+        return None, {}, not_deferrable_error(name, session_names)
     return name, raw_args, None
 
 

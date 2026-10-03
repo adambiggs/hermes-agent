@@ -414,7 +414,7 @@ def _unwrap_tool_search_call(
             return function_name, function_args, None
         if underlying not in _tool_search_scoped_names(agent):
             return function_name, function_args, (
-                f"'{underlying}' is not available in this session. Use tool_search to find tools you can call."
+                f"'{underlying}' is not available in this session. Search the tool catalog to find tools you can call."
             )
         # Validate before unwrapping: the generic bridge hides the concrete
         # parameter schema from provider-native tool-call validation.

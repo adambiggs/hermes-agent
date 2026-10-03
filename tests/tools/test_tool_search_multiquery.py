@@ -460,6 +460,20 @@ class TestBatchedDescribe:
         assert result["errors"][name]
         assert name not in result.get("not_found", [])
 
+    def test_registered_direct_surface_name_outside_the_session_is_not_found(self, issue_defs):
+        from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
+
+        name = "mq_desktop_absent_action"
+        _register(name, "desktop_ui")
+        result = json.loads(dispatch_tool_describe(
+            {"names": [name]},
+            current_tool_defs=issue_defs,
+            config=ToolSearchConfig.from_raw({}),
+        ))
+
+        assert result["not_found"] == [name]
+        assert "errors" not in result
+
     def test_registry_lookup_failure_is_not_found(self, monkeypatch):
         from tools.registry import registry
         from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
@@ -536,3 +550,34 @@ class TestConfigAndSchema:
         describe_params = schemas["tool_describe"]["parameters"]
         assert describe_params["required"] == ["names"]
         assert describe_params["properties"]["names"]["type"] == "array"
+
+
+class TestSearchToolNameNeutralText:
+    """Responses-route providers reserve ``tool_search`` and the transport renames the
+    declaration on the wire, so model-facing text must not name it."""
+
+    def test_bridge_schemas_and_listings_do_not_name_the_search_tool(self):
+        from tools.tool_search import bridge_tool_schemas
+        from tools.tool_search_catalog import build_catalog_listing_with_form
+
+        deferred = [_td(f"mq_neutral_{i:02d}", "Neutral wording check capability " * 4)
+                    for i in range(40)]
+        full, full_form = build_catalog_listing_with_form(deferred, max_tokens=100_000)
+        summary, summary_form = build_catalog_listing_with_form(deferred, max_tokens=60)
+        assert (full_form, summary_form) == ("full", "groups")
+
+        texts = [full, summary]
+        for listing, form in ((full, full_form), (summary, summary_form), (None, "none")):
+            for granted in (False, True):
+                for schema in bridge_tool_schemas(len(deferred), listing, form, granted):
+                    fn = dict(schema["function"])
+                    fn.pop("name")
+                    texts.append(json.dumps(fn))
+        for text in texts:
+            assert "tool_search" not in text
+
+    def test_rejection_messages_do_not_name_the_search_tool(self):
+        from tools.tool_search_validation import not_deferrable_error
+
+        for session in (None, ["terminal"], ["read_file"]):
+            assert "tool_search" not in not_deferrable_error("read_file", session)

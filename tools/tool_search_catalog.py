@@ -283,7 +283,7 @@ def build_catalog_listing_with_form(
         tools = sorted(groups[label])
         if mode == "summary":
             return (f"{label} ({len(tools)} tools — names not listed; "
-                    f"discover via `{TOOL_SEARCH_NAME}`)")
+                    "discover via the tool search)")
         lines = [f"{label} tools ({len(tools)}):"]
         if mode == "full":
             lines.extend(f"- {name}: {desc}" if desc else f"- {name}" for name, desc in tools)

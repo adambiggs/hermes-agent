@@ -6,7 +6,7 @@ import copy
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from tools.registry import tool_error
 from tools.tool_search_catalog import BRIDGE_TOOL_NAMES, _registry_entry
@@ -210,14 +210,18 @@ def local_batch_error(entries: List[Dict[str, Any]]) -> str:
     )
 
 
-def not_deferrable_error(name: str) -> str:
+def not_deferrable_error(name: str, session_names: Optional[Iterable[str]] = None) -> str:
     """Rejection for a ``tool_call`` naming something that is not a deferred tool.
     Two different mistakes reach here and need opposite corrections: a directly-listed
     tool (call it without the bridge) vs. an unknown name — typically a deferred MCP tool
     cited by its bare suffix instead of the full ``mcp__<server>__<tool>`` name. Telling
-    the second group 'call it directly' is the opposite of what they must do."""
+    the second group 'call it directly' is the opposite of what they must do.
+    ``session_names`` is the session's tool scope: a registered tool outside it is not
+    directly listed, so telling the model to call it directly names a tool it lacks."""
     from tools.tool_search import _core_tool_names  # late: tool_search imports this module
     if name in _core_tool_names() or _registry_entry(name) is not None:
+        if session_names is not None and name not in set(session_names):
+            return f"'{name}' is not available in this session."
         return (f"'{name}' is a directly-listed tool, not a deferred one. "
                 "Call it directly instead of via tool_call.")
     suffix = f"__{name}"
@@ -227,6 +231,6 @@ def not_deferrable_error(name: str) -> str:
     except Exception:
         candidates = []
     hint = (f" Did you mean {', '.join(repr(c) for c in candidates)}?" if candidates
-            else " Use tool_search to find the exact name.")
+            else " Search the tool catalog to find the exact name.")
     return (f"'{name}' is not a known tool name. Deferred tools must be invoked through tool_call "
-            f"by the exact name tool_search returns (e.g. mcp__<server>__<tool>).{hint}")
+            f"by the exact name the tool search returns (e.g. mcp__<server>__<tool>).{hint}")

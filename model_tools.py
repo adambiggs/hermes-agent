@@ -722,14 +722,16 @@ def _dispatch_bridge_tool(function_name: str, function_args: Dict[str, Any],
     try:
         current_defs = get_tool_definitions(enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
                                             quiet_mode=True, skip_tool_search_assembly=True) or []
+        session_names = list(ts._tool_def_names(current_defs))
     except Exception:
         current_defs = []
+        session_names = None
     args = function_args or {}
     if function_name == ts.TOOL_SEARCH_NAME:
         return ts.dispatch_tool_search(args, current_tool_defs=current_defs), None
     if function_name == ts.TOOL_DESCRIBE_NAME:
         return ts.dispatch_tool_describe(args, current_tool_defs=current_defs), None
-    underlying_name, underlying_args, err = ts.resolve_underlying_call(args)
+    underlying_name, underlying_args, err = ts.resolve_underlying_call(args, session_names=session_names)
     if err or not underlying_name:
         return tool_error(err or "tool_call could not be resolved"), None
     if underlying_name == ts.CONNECTOR_BATCH_SENTINEL:
@@ -740,7 +742,7 @@ def _dispatch_bridge_tool(function_name: str, function_args: Dict[str, Any],
     # registry; also require membership in the session-scoped catalog.
     if underlying_name not in ts.scoped_deferrable_names(current_defs):
         return tool_error(f"'{underlying_name}' is not available in this session. "
-                          "Use tool_search to find tools you can call."), None
+                          "Search the tool catalog to find tools you can call."), None
     # Validate against the deferred tool's concrete schema — the generic
     # ``arguments: object`` bridge schema can't enforce it.
     probe_err = ts.validate_deferred_call_args(underlying_name, underlying_args)

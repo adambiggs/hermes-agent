@@ -110,6 +110,27 @@ def test_resolve_unknown_name_points_at_tool_search_not_direct_call():
     assert "directly-listed tool" in err and "not a known tool" not in err
 
 
+def test_resolve_direct_tool_is_directly_listed_only_inside_the_session():
+    _, _, err = resolve_underlying_call({"name": "read_file", "arguments": {}},
+                                        session_names=["read_file", "terminal"])
+    assert "directly-listed tool" in err
+    _, _, err = resolve_underlying_call({"name": "read_file", "arguments": {}},
+                                        session_names=["terminal"])
+    assert err == "'read_file' is not available in this session."
+
+
+def test_bridge_tool_call_scopes_direct_tool_rejection_to_the_session(monkeypatch):
+    import model_tools
+
+    monkeypatch.setattr(model_tools, "get_tool_definitions", lambda **kw: [
+        {"type": "function", "function": {"name": "terminal", "description": "x",
+                                          "parameters": {"type": "object", "properties": {}}}}])
+    result, redispatch = model_tools._dispatch_bridge_tool(
+        "tool_call", {"name": "read_file", "arguments": {}}, None, None)
+    assert redispatch is None
+    assert "not available in this session" in result and "directly-listed" not in result
+
+
 def test_resolve_legacy_connector_single_shape_routes_to_sentinel():
     name, args, err = resolve_underlying_call(
         {"name": "connectors__gmail__CREATE_EMAIL_DRAFT", "arguments": {}}
