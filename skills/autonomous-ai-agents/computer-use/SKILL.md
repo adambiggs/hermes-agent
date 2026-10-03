@@ -10,11 +10,13 @@ metadata:
     tags: [computer-use, desktop, automation, gui, cross-platform]
     category: desktop
     related_skills: []
+    requires_tools: [computer_use]
 ---
 
 # Computer Use (universal, any-model, cross-platform)
 
-You have a `computer_use` tool that drives the user's desktop in the
+This skill applies only when the `computer_use` tool is in your tool list.
+That tool drives the user's desktop in the
 **background** — your actions do NOT move the user's cursor, steal
 keyboard focus, or switch virtual desktops / Spaces. The user can keep
 typing in their editor while you click around in a browser in another
