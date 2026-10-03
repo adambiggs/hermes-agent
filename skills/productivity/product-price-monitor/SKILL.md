@@ -9,6 +9,7 @@ metadata:
   hermes:
     tags: [Prices, Availability, Shopping, Travel, Alerts]
     related_skills: [maps]
+    requires_tools: [cronjob_manage]
 ---
 
 # Product Price Monitor

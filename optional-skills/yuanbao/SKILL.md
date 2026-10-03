@@ -9,6 +9,7 @@ metadata:
   hermes:
     tags: [yuanbao, mention, at, group, members, 元宝, 派, 艾特]
     related_skills: []
+    requires_tools: [yb_query_group_members, yb_send_dm]
 ---
 
 # Yuanbao Group Interaction

@@ -9,6 +9,7 @@ metadata:
   hermes:
     tags: [Competitors, News, Market-Research, Monitoring]
     related_skills: [blogwatcher, rss-feeds, reddit-reading]
+    requires_tools: [cronjob_manage]
 ---
 
 # Competitor News Monitor
