@@ -26,8 +26,8 @@ In-repo skills must meet the repo's **hardline authoring standards** (see AGENTS
 
 - User asks you to add a skill "in this branch / repo / commit"
 - You're committing a reusable workflow that should ship with hermes-agent
-- You're editing an existing skill under `skills/` or `optional-skills/` (use `patch` for small edits, `write_file` for rewrites; `skill_manage` still works for patch on in-repo skills, but not for `create`)
-- Don't use for: personal skills in `~/.hermes/skills/` (just use `skill_manage`)
+- You're editing an existing skill under `skills/` or `optional-skills/` (use `patch` for small edits, `write_file` for rewrites; where the session has `skill_manage`, it also patches in-repo skills, but cannot `create` them)
+- Don't use for: personal skills in `~/.hermes/skills/` (those are `skill_manage`'s job where the session has it)
 
 ## Decide the Tier First: Bundled vs Optional
 
@@ -129,7 +129,7 @@ Not every section applies to every skill (a pure-procedure task skill may have n
 
 ### Reference Hermes tools, not raw shell
 
-When the skill needs a capability, name the proper Hermes tool in backticks: `terminal`, `read_file`, `write_file`, `patch`, `search_files`, `web_search`, `web_extract`, `browser_navigate`, `vision_analyze`, `delegate_task`, `cronjob_manage`. Do NOT name shell utilities the agent already has wrapped (`grep` → `search_files`, `cat` → `read_file`, `sed`/`awk` → `patch`, `find`/`ls` → `search_files target='files'`). A CLI-wrapper skill should frame invocations as `terminal(command="<tool> ...", timeout=...)` — bare shell prose ("run `foo --version`") is a review-blocking non-conformance. If the skill depends on an MCP server, name it and document setup in Prerequisites.
+When the skill needs a capability, name the proper Hermes tool in backticks by its advertised name, for example `terminal`, `read_file`, `write_file`, `patch`, `search_files`. Not every session holds every tool: browser, cron, vision and delegation tools depend on toolsets and availability checks. A skill that cannot work without such a tool declares it under `metadata.hermes.requires_tools`, which hides the skill from the index where the tool is absent; a skill that needs it for one optional step scopes that step to sessions where the tool is in the tool list. Do NOT name shell utilities the agent already has wrapped (`grep` → `search_files`, `cat` → `read_file`, `sed`/`awk` → `patch`, `find`/`ls` → `search_files target='files'`). A CLI-wrapper skill should frame invocations as `terminal(command="<tool> ...", timeout=...)` — bare shell prose ("run `foo --version`") is a review-blocking non-conformance. If the skill depends on an MCP server, name it and document setup in Prerequisites.
 
 ### Never use machine-local paths
 
@@ -177,7 +177,7 @@ A skill exists to make the agent's process more predictable — the agent reliab
 
 ## Editing Existing In-Repo Skills
 
-- **Small fix:** `skill_manage(action='patch', ...)` works on in-repo skills, as does `patch`.
+- **Small fix:** `patch`, or `skill_manage(action='patch', ...)` where the session has it.
 - **Major rewrite:** `write_file` the whole SKILL.md.
 - **Supporting files:** `write_file` to `references/`, `templates/`, or `scripts/` under the skill dir.
 - **Always commit** — in-repo skills are source, not runtime state. Re-run the docs generator when frontmatter changed.
