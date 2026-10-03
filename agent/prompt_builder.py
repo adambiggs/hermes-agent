@@ -628,7 +628,7 @@ _MEDIA_NATIVE = (
 )
 
 _LOCAL_CRON_DELIVERY_NOTE = (
-    "Cron jobs scheduled from this session are LOCAL-ONLY: their output is saved (viewable via cronjob "
+    "Cron jobs scheduled from this session are LOCAL-ONLY: their output is saved (viewable via cronjob_manage "
     "action='list') but is NOT delivered back into this session — there is no live-delivery channel here. If "
     "the user wants to be notified when a job runs, the job's `deliver` must target a gateway-connected "
     "messaging platform (e.g. deliver='telegram' or 'all'). Do not promise that a deliver='origin' or "
@@ -889,7 +889,7 @@ _WINDOWS_BASH_SHELL_HINT = (
     "found' even though `cd /c/Users/x` (a bash builtin) works. Pass `C:/Users/x`-style forward-slash native paths to "
     # no-tmp: ok — tells the model what NOT to use
     "native tools, and prefer `$LOCALAPPDATA/Temp` (or `$TMPDIR`, which Hermes points at its own scratch dir) for scratch files a native tool must read — never a bare `/tmp`. When "
-    "answering prompts in a pty background process, use process(submit) — never process(write) with a bare trailing "
+    "answering prompts in a pty background process, use process_manage(submit) — never process_manage(write) with a bare trailing "
     "newline: Enter on a Windows PTY is a carriage return, and a lone `\\n"
     "` is not delivered as a line terminator, so the child's prompt silently never returns. When a CLI offers a "
     "non-interactive path (flags, `--with-token`, config files, an OAuth device flow polled with curl), prefer it over "

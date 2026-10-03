@@ -129,7 +129,7 @@ def build_blueprint_seed(blueprint) -> str:
 
     lines.append("")
     lines.append(
-        "Once you have my answers, create the job by calling the cronjob tool "
+        "Once you have my answers, create the job by calling the cronjob_manage tool "
         "with action='create'. Build the schedule as a cron expression from "
         f"this template: `{blueprint.schedule_template}` "
         "(fill {minute}/{hour} from the chosen time, {dow} from the weekday "

@@ -1647,7 +1647,7 @@ class GatewayNotificationsMixin:
         if omitted:
             lines.append(
                 f"\n- … and {omitted} more completion(s); inspect them with "
-                "the process tool if they affect the conclusion."
+                "the process_manage tool if they affect the conclusion."
             )
         lines.append("If a result does not change the current conclusion, absorb it silently.]")
         return "\n".join(lines)

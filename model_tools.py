@@ -405,7 +405,7 @@ def _rewrite_delegate_task(td: Dict[str, Any], available: set) -> Optional[Dict[
         return td
     fn = td.get("function", {})
     desc = fn.get("description", "")
-    for full, self_named in (("delegate_task, clarify, memory, or cronjob", True), ("clarify, memory, or cronjob", False)):
+    for full, self_named in (("delegate_task, clarify, memory, or cronjob_manage", True), ("clarify, memory, or cronjob_manage", False)):
         if full in desc:
             break
     else:
