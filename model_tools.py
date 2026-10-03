@@ -395,31 +395,52 @@ def _rewrite_browser_exec(td: Dict[str, Any], available: set) -> Optional[Dict[s
     return td if "terminal" in available else None
 
 
-def _rewrite_delegate_task(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
+_DELEGATE_DURABLE_LINE = "- Durable work that must survive this session"
+_DELEGATE_DURABLE_TARGETS = (("cronjob_manage", "cronjob_manage"), ("terminal", "terminal(background=True, notify=True)"))
+
+
+def _trim_delegate_restrictions(desc: str, available: set) -> str:
     """Trim the child-restrictions line to sibling tools actually present, or drop
-    the line when none apply, so the model never learns ghost vocabulary. Two
-    source variants exist (depth-off also names delegate_task itself); test the
-    longer one first because the sibling list is a substring of it."""
+    the line when none apply. Two source variants exist (depth-off also names
+    delegate_task itself); test the longer one first because the sibling list is
+    a substring of it."""
     blocked_present = [t for t in ("clarify", "memory", "cronjob_manage") if t in available]
     if len(blocked_present) == 3:
-        return td
-    fn = td.get("function", {})
-    desc = fn.get("description", "")
+        return desc
     for full, self_named in (("delegate_task, clarify, memory, or cronjob_manage", True), ("clarify, memory, or cronjob_manage", False)):
         if full in desc:
             break
     else:
-        return td
+        return desc
     if blocked_present:
         names = (["delegate_task"] if self_named else []) + blocked_present
         replacement = " or ".join(names) if len(names) <= 2 else ", ".join(names[:-1]) + ", or " + names[-1]
-        desc = desc.replace(full, replacement)
-    else:
-        # Both variants end at the following newline.
-        start = desc.find("- Children cannot call " + full)
-        if start != -1:
-            desc = desc[:start] + desc[desc.index("\n", start) + 1:]
-    return {**td, "function": {**fn, "description": desc}}
+        return desc.replace(full, replacement)
+    # Both variants end at the following newline.
+    start = desc.find("- Children cannot call " + full)
+    return desc if start == -1 else desc[:start] + desc[desc.index("\n", start) + 1:]
+
+
+def _trim_delegate_durable(desc: str, available: set) -> str:
+    """Name only the durable-work alternatives the session has. With neither, the
+    line keeps its note on what halts running subagents and loses the arrow."""
+    full = f"{_DELEGATE_DURABLE_LINE} -> " + " or ".join(call for _, call in _DELEGATE_DURABLE_TARGETS) + ";"
+    if full not in desc:
+        return desc
+    present = [call for name, call in _DELEGATE_DURABLE_TARGETS if name in available]
+    if len(present) == len(_DELEGATE_DURABLE_TARGETS):
+        return desc
+    trimmed = f"{_DELEGATE_DURABLE_LINE} -> " + " or ".join(present) + ";" if present else f"{_DELEGATE_DURABLE_LINE}:"
+    return desc.replace(full, trimmed)
+
+
+def _rewrite_delegate_task(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
+    """Name only sibling tools the session has in the child-restrictions and
+    durable-work lines, so the model never learns ghost vocabulary."""
+    fn = td.get("function", {})
+    desc = fn.get("description", "")
+    new = _trim_delegate_durable(_trim_delegate_restrictions(desc, available), available)
+    return td if new == desc else {**td, "function": {**fn, "description": new}}
 
 
 _VAULT_INPUT_TOOL_HINT = "the browser's input tool"

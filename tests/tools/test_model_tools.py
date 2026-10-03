@@ -553,3 +553,45 @@ def test_tool_defs_cache_key_sees_config_replacement_with_pinned_mtime(tmp_path)
         shutil.copy2(other, cfg)
         os.utime(cfg, ns=(st.st_atime_ns, st.st_mtime_ns))
         assert _tool_defs_cache_key(None, None, False) != before
+
+
+class TestDelegateTaskSiblingNames:
+    """delegate_task's description names only sibling tools the session has."""
+
+    @staticmethod
+    def _rendered(*siblings):
+        from model_tools import _apply_dynamic_schemas
+        from tools.delegate_tool import _build_top_level_description
+
+        defs = [{"type": "function", "function": {"name": n, "description": f"{n}."}} for n in ("delegate_task",) + siblings]
+        defs[0]["function"]["description"] = _build_top_level_description()
+        return _apply_dynamic_schemas(defs)[0]["function"]["description"]
+
+    def test_all_siblings_present_keeps_both_durable_alternatives(self):
+        rendered = self._rendered("clarify", "memory", "cronjob_manage", "terminal")
+        assert "-> cronjob_manage or terminal(background=True, notify=True);" in rendered
+
+    def test_without_cronjob_manage_keeps_only_terminal(self):
+        rendered = self._rendered("clarify", "memory", "terminal")
+        assert "cronjob_manage" not in rendered
+        assert "-> terminal(background=True, notify=True);" in rendered
+
+    def test_without_terminal_names_only_cronjob_manage(self):
+        rendered = self._rendered("cronjob_manage")
+        assert "terminal(" not in rendered
+        assert "-> cronjob_manage;" in rendered
+
+    def test_without_either_keeps_only_the_halt_note(self):
+        rendered = self._rendered()
+        assert "cronjob_manage" not in rendered
+        assert "terminal(" not in rendered
+        assert "- Durable work that must survive this session: /stop, /new, or process exit halts" in rendered
+
+    def test_child_restrictions_name_only_present_siblings(self):
+        rendered = self._rendered("clarify", "terminal")
+        line = next(l for l in rendered.splitlines() if l.startswith("- Children cannot call "))
+        assert "clarify" in line and "memory" not in line and "cronjob_manage" not in line
+
+    def test_child_restrictions_line_dropped_without_siblings(self):
+        rendered = self._rendered("terminal")
+        assert "Children cannot call" not in rendered
