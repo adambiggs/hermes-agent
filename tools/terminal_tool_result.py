@@ -167,10 +167,39 @@ def _failure_hint(command: str, returncode: int, output: str, exit_note) -> Opti
     return None
 
 
-def _redact_spill_file(path, total_chars, command) -> list[tuple[str, Any]]:
+# Where a non-local backend receives the spill: a host path under HERMES_HOME
+# is unreachable from a container or remote host, so the redacted copy is
+# written inside the environment the command ran in.
+_SANDBOX_SPILL_DIR = "/tmp/hermes-terminal-output"
+# Spills kept in the environment, including the new one.
+_SANDBOX_SPILL_KEEP = 8
+
+
+def _deliver_spill_to_env(env, host_path: Path, content: str) -> Optional[str]:
+    """Write the redacted spill into a non-local environment through its own
+    ``execute`` (stdin, no ARG_MAX limit) and return the in-environment path,
+    or None when the write fails."""
+    import shlex
+    from tools.environments.base_output import _SPILL_MAX_AGE_S
+    target = f"{_SANDBOX_SPILL_DIR}/{host_path.name}"
+    d, t = shlex.quote(_SANDBOX_SPILL_DIR), shlex.quote(target)
+    # Owner and symlink checks refuse a directory planted by another user on a
+    # shared host; noclobber refuses a planted file. Pruning is by age and by
+    # count, because a container /tmp is usually a small RAM-backed tmpfs.
+    cmd = (f"umask 077 && mkdir -p {d} && [ -O {d} ] && [ ! -L {d} ] && "
+           f"{{ find {d} -maxdepth 1 -name 'out-*.log' -mmin +{_SPILL_MAX_AGE_S // 60} -delete; "
+           f"ls -1t {d}/out-*.log 2>/dev/null | tail -n +{_SANDBOX_SPILL_KEEP} | xargs -r rm -f --; "
+           f"set -C; cat > {t}; }}")
+    result = env.execute(cmd, timeout=60, stdin_data=content)
+    return target if (result or {}).get("returncode") == 0 else None
+
+
+def _redact_spill_file(path, total_chars, command, env=None, env_type="local") -> list[tuple[str, Any]]:
     """Spill handle so the model can read the omitted middle instead of
     re-running. The collector wrote it raw; redact it with the same pass so no
-    secret persists unmasked on disk. On failure drop the handle (and file)."""
+    secret persists unmasked on disk. On failure drop the handle (and file).
+    A non-local backend gets the redacted copy inside its own filesystem, where
+    read_file and search_files resolve paths, and the host copy is removed."""
     if not path:
         return []
     try:
@@ -178,10 +207,23 @@ def _redact_spill_file(path, total_chars, command) -> list[tuple[str, Any]]:
         from tools.ansi_strip import strip_ansi
         from tools.spill_safety import write_text_exclusive
         raw_spill = Path(path).read_text(encoding="utf-8", errors="replace")
+        redacted = redact_terminal_output(strip_ansi(raw_spill), command)
         # lstat-checked unlink + exclusive create: the redacted copy can't
         # be diverted through a symlink planted since the collector's write.
-        write_text_exclusive(Path(path), redact_terminal_output(strip_ansi(raw_spill), command),
-                             private=True, overwrite=True, errors="replace")
+        write_text_exclusive(Path(path), redacted, private=True, overwrite=True, errors="replace")
+        if env_type != "local":
+            delivered = None
+            with _quiet("spill delivery to environment"):
+                delivered = _deliver_spill_to_env(env, Path(path), redacted) if env is not None else None
+            with _quiet("host spill unlink"):
+                Path(path).unlink()
+            if not delivered:
+                note = ("Output exceeded the capture window (head+tail shown) and the full "
+                        "output could not be saved where your tools can read it. To see the "
+                        "omitted middle, re-run the command with its output redirected to a "
+                        "file, then search or page that file.")
+                return [("output_total_chars", total_chars), ("truncation_note", note)]
+            path = delivered
     except Exception:
         logger.debug("spill redaction failed; dropping spill handle", exc_info=True)
         with _quiet("spill unlink"):
@@ -261,7 +303,8 @@ def finalize_foreground_result(
     optional_fields: list[tuple[str, Any]] = [
         ("cwd", changed_cwd),
         ("environment_recreated", _ENV_RECREATED_NOTE if result.get("environment_recreated") else None),
-        *_redact_spill_file(result.get("full_output_path"), result.get("output_total_chars"), command),
+        *_redact_spill_file(result.get("full_output_path"), result.get("output_total_chars"), command,
+                            env=env, env_type=env_type),
         ("verification_evidence", _verification_evidence(
             command, command_cwd, session_id or task_id or effective_task_id or "default",
             returncode, output)),
