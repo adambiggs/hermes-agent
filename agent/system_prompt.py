@@ -442,11 +442,26 @@ def _cron_delivery_hint(agent: Any) -> str:
     return f"Delivery destination ({deliver_key}): {hint}" if hint else ""
 
 
+def _cron_scheduling_available() -> bool:
+    """Whether cronjob_manage passes its own availability check in this process. The local-cron
+    note teaches that tool, so a session where the check fails (e.g. a ``-z`` one-shot) must not
+    carry it. Deferral behind the tool search bridge does not matter here: a deferred tool is
+    still callable. True when the check cannot run, which keeps the note."""
+    try:
+        from tools.cronjob_tools import check_cronjob_requirements
+        return bool(check_cronjob_requirements())
+    except Exception:
+        return True
+
+
 def platform_hint(agent: Any) -> str:
     """Built-in/plugin platform hint + Telegram rich-messages opt-in + config
     override + desktop TUI clarifier; cron agents also carry their delivery channel's hint."""
     platform_key = (agent.platform or "").lower().strip()
     _effective_hint = _resolve_platform_hint(agent, platform_key, _default_platform_hint(platform_key))
+    if _pb._LOCAL_CRON_DELIVERY_NOTE in _effective_hint and not _cron_scheduling_available():
+        _note = _pb._LOCAL_CRON_DELIVERY_NOTE
+        _effective_hint = _effective_hint.replace(f" {_note}" if f" {_note}" in _effective_hint else _note, "")
     if platform_key == "tui" and _effective_hint:
         _effective_hint = _tui_embedded_pane_clarifier(_effective_hint)
     if platform_key == "cron":

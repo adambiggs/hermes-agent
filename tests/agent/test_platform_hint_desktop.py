@@ -81,6 +81,9 @@ class TestPlatformHintResolutionInStablePrompt:
     def test_embedded_tui_yields_tui_hint_with_clarifier(self, monkeypatch):
         monkeypatch.setenv("HERMES_DESKTOP", "1")
         monkeypatch.setenv("HERMES_DESKTOP_TERMINAL", "1")
+        # A TUI session marks itself interactive, so cron scheduling is available and the
+        # static hint (local-cron note included) survives intact.
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         stable = _stable_prompt(_make_agent(platform="tui"))
         assert PLATFORM_HINTS["tui"] in stable
         assert "embedded terminal pane" in stable

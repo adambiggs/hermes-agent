@@ -43,3 +43,21 @@ def test_delivery_target_only_applies_to_cron_agents(deliver_to):
     assert platform_hint(_agent("telegram")) == PLATFORM_HINTS["telegram"]
     _VAR_MAP["HERMES_CRON_AUTO_DELIVER_PLATFORM"].set("")
     assert platform_hint(_agent("cron")) == PLATFORM_HINTS["cron"]
+
+
+
+@pytest.mark.parametrize("platform", ["cli", "tui"])
+def test_local_cron_note_only_where_cron_scheduling_is_available(platform, monkeypatch):
+    from agent.prompt_builder import _LOCAL_CRON_DELIVERY_NOTE
+
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
+    for var in ("HERMES_INTERACTIVE", "HERMES_GATEWAY_SESSION", "HERMES_EXEC_ASK"):
+        monkeypatch.delenv(var, raising=False)
+    hint = platform_hint(_agent(platform))
+    assert "cronjob_manage" not in hint
+    assert hint.endswith(".")
+    appended = platform_hint(_agent(platform, {platform: {"append": EXTRA}}))
+    assert "cronjob_manage" not in appended and appended.endswith(f".\n\n{EXTRA}")
+
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    assert _LOCAL_CRON_DELIVERY_NOTE in platform_hint(_agent(platform))
