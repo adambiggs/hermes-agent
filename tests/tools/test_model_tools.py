@@ -595,3 +595,42 @@ class TestDelegateTaskSiblingNames:
     def test_child_restrictions_line_dropped_without_siblings(self):
         rendered = self._rendered("terminal")
         assert "Children cannot call" not in rendered
+
+
+class TestMemorySiblingNames:
+    """memory's description names skill_manage and session_search only when the session has them."""
+
+    @staticmethod
+    def _rendered(*siblings):
+        from model_tools import _apply_dynamic_schemas
+        from tools.memory_tool import MEMORY_SCHEMA
+
+        defs = [{"type": "function", "function": dict(MEMORY_SCHEMA)}]
+        defs += [{"type": "function", "function": {"name": n, "description": f"{n}."}} for n in siblings]
+        return _apply_dynamic_schemas(defs)[0]["function"]["description"]
+
+    def test_both_present_keeps_source_text(self):
+        from tools.memory_tool import MEMORY_SCHEMA
+
+        assert self._rendered("skill_manage", "session_search") == MEMORY_SCHEMA["description"]
+
+    def test_without_skill_manage_keeps_skill_guidance(self):
+        rendered = self._rendered("session_search")
+        assert "skill_manage" not in rendered
+        assert "belongs in the task's skill, where it loads only when relevant" in rendered
+        assert "(use session_search for those)" in rendered
+
+    def test_without_session_search_drops_the_pointer(self):
+        rendered = self._rendered("skill_manage")
+        assert "session_search" not in rendered
+        assert "temporary TODO state. Reusable" in rendered
+        assert "via skill_manage" in rendered
+
+    def test_oneshot_session_drops_skill_manage_pointer(self, monkeypatch):
+        """-z/-q sessions never hold skill_manage, so memory's schema must not name it there."""
+        from model_tools import get_tool_definitions
+
+        monkeypatch.setenv("HERMES_SINGLE_QUERY_SESSION", "1")
+        defs = {t["function"]["name"]: t for t in get_tool_definitions(["hermes-cli"], quiet_mode=True)}
+        assert "skill_manage" not in defs
+        assert "skill_manage" not in defs["memory"]["function"]["description"]

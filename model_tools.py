@@ -23,6 +23,7 @@ from tools.registry import _MAX_TOOL_ERROR_CHARS as _TOOL_ERROR_MAX_LEN
 from toolsets import resolve_toolset, validate_toolset
 from tools.arg_coercion import coerce_tool_args
 from utils import file_signature
+from agent.oneshot_footprint import ONESHOT_HIDDEN_TOOLS, is_single_query_session
 
 logger = logging.getLogger(__name__)
 
@@ -274,7 +275,7 @@ def _tool_defs_cache_key(
         registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
-        _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
+        _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope, is_single_query_session(),
     )
 
 
@@ -443,6 +444,21 @@ def _rewrite_delegate_task(td: Dict[str, Any], available: set) -> Optional[Dict[
     return td if new == desc else {**td, "function": {**fn, "description": new}}
 
 
+_MEMORY_SIBLING_PHRASES = (("skill_manage", " via skill_manage"), ("session_search", " (use session_search for those)"))
+
+
+def _rewrite_memory(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
+    """Drop memory's pointers to skill_manage and session_search when the session
+    lacks them; the surrounding guidance stands without the tool name."""
+    fn = td.get("function", {})
+    desc = fn.get("description", "")
+    new = desc
+    for name, phrase in _MEMORY_SIBLING_PHRASES:
+        if name not in available:
+            new = new.replace(phrase, "")
+    return td if new == desc else {**td, "function": {**fn, "description": new}}
+
+
 _VAULT_INPUT_TOOL_HINT = "the browser's input tool"
 
 
@@ -497,6 +513,7 @@ _DYNAMIC_SCHEMA_REWRITERS = {
     "browser_vault_list": _rewrite_browser_vault,
     "browser_vault_fill": _rewrite_browser_vault,
     "delegate_task": _rewrite_delegate_task,
+    "memory": _rewrite_memory,
 }
 
 
@@ -527,6 +544,10 @@ def _compute_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disa
                               quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     tools_to_include = _select_tool_names(enabled_toolsets, disabled_toolsets, quiet_mode)
+    # One-shot sessions drop their hidden tools here, before the dynamic schemas take their availability
+    # snapshot, so sibling descriptions never name a tool the session will not hold.
+    if is_single_query_session():
+        tools_to_include -= ONESHOT_HIDDEN_TOOLS
     # Selection is per schema, not per process/profile. Kanban's local checks
     # are uncached; the outer definitions cache already keys on this selection.
     from tools.kanban_toolset_context import scoped_kanban_toolset_selection
