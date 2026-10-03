@@ -658,9 +658,17 @@ _CONDITION_KEYS = ("fallback_for_toolsets", "requires_toolsets", "fallback_for_t
 
 
 def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
-    """Extract conditional activation fields from parsed frontmatter (absent = ``[]``)."""
+    """Extract conditional activation fields from parsed frontmatter (absent = ``[]``).
+    Top-level ``prerequisites.tools`` gates like ``requires_tools``: a skill built on
+    integration tools stays out of the index where those tools are unreachable."""
     hermes = _hermes_metadata(frontmatter)
-    return {key: hermes.get(key, []) for key in _CONDITION_KEYS}
+    conditions = {key: hermes.get(key, []) for key in _CONDITION_KEYS}
+    prerequisites = frontmatter.get("prerequisites")
+    prereq_tools = prerequisites.get("tools") if isinstance(prerequisites, dict) else None
+    if isinstance(prereq_tools, list):
+        required = conditions["requires_tools"] if isinstance(conditions["requires_tools"], list) else []
+        conditions["requires_tools"] = required + [t for t in prereq_tools if isinstance(t, str) and t not in required]
+    return conditions
 
 
 def extract_skill_config_vars(frontmatter: Dict[str, Any]) -> List[Dict[str, Any]]:

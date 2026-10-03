@@ -24,13 +24,17 @@ from agent.system_prompt import (
 )
 
 
-def _stable_prompt(agent):
+def _prompt_parts(agent):
     with (
         patch("agent.prompt_builder.load_soul_md", return_value=""),
         patch("agent.prompt_builder.build_environment_hints", return_value=""),
         patch("agent.prompt_builder.build_context_files_prompt", return_value=""),
     ):
-        return build_system_prompt_parts(agent)["stable"]
+        return build_system_prompt_parts(agent)
+
+
+def _stable_prompt(agent):
+    return _prompt_parts(agent)["stable"]
 
 
 def _make_agent(platform="", **overrides):
@@ -81,13 +85,14 @@ class TestPlatformHintResolutionInStablePrompt:
     def test_embedded_tui_yields_tui_hint_with_clarifier(self, monkeypatch):
         monkeypatch.setenv("HERMES_DESKTOP", "1")
         monkeypatch.setenv("HERMES_DESKTOP_TERMINAL", "1")
-        # A TUI session marks itself interactive, so cron scheduling is available and the
-        # static hint (local-cron note included) survives intact.
+        # A TUI session marks itself interactive and holds cronjob_manage, so cron scheduling is
+        # available and the static hint (local-cron note included) survives intact. Holding a
+        # tool places the platform hint after the workspace block, in the context tier.
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
-        stable = _stable_prompt(_make_agent(platform="tui"))
-        assert PLATFORM_HINTS["tui"] in stable
-        assert "embedded terminal pane" in stable
-        assert "Shift-drag" in stable or "Option-drag" in stable or "⌥" in stable
+        context = _prompt_parts(_make_agent(platform="tui", valid_tool_names=["cronjob_manage"]))["context"]
+        assert PLATFORM_HINTS["tui"] in context
+        assert "embedded terminal pane" in context
+        assert "Shift-drag" in context or "Option-drag" in context or "⌥" in context
 
 
 

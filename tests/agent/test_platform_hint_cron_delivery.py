@@ -61,3 +61,16 @@ def test_local_cron_note_only_where_cron_scheduling_is_available(platform, monke
 
     monkeypatch.setenv("HERMES_INTERACTIVE", "1")
     assert _LOCAL_CRON_DELIVERY_NOTE in platform_hint(_agent(platform))
+
+
+@pytest.mark.parametrize("platform", ["cli", "tui"])
+def test_local_cron_note_only_where_the_session_holds_cronjob_manage(platform, monkeypatch):
+    from agent.prompt_builder import _LOCAL_CRON_DELIVERY_NOTE
+
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    agent = _agent(platform)
+    agent.valid_tool_names = {"terminal"}
+    assert "cronjob_manage" not in platform_hint(agent)
+    agent.valid_tool_names = {"terminal", "cronjob_manage"}
+    assert _LOCAL_CRON_DELIVERY_NOTE in platform_hint(agent)

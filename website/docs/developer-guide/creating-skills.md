@@ -130,6 +130,8 @@ metadata:
 | `fallback_for_toolsets` | Skill is **hidden** when ANY listed toolset **is** available |
 | `fallback_for_tools` | Skill is **hidden** when ANY listed tool **is** available |
 
+A tool counts as available when the session can call it, either directly or through `tool_call` when Tool Search defers it, and its toolset then counts for the `*_toolsets` conditions. A top-level `prerequisites.tools` list gates the skill the same way as `requires_tools`.
+
 **Use case for `fallback_for_*`:** Create a skill that serves as a workaround when a primary tool isn't available. For example, a `duckduckgo-search` skill with `fallback_for_tools: [web_search]` only shows when the web search tool (which requires an API key) is not configured.
 
 **Use case for `requires_*`:** Create a skill that only makes sense when certain tools are present. For example, a web scraping workflow skill with `requires_toolsets: [web]` won't clutter the prompt when web tools are disabled.

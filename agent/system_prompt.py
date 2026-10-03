@@ -298,19 +298,31 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
     return " ".join(g for g in tool_guidance if g) or None
 
 
+def _skill_gate_tool_names(agent: Any) -> set:
+    """Tools a skill gate counts as held: the model-visible tools plus, when the
+    ``tool_call`` bridge is present, the deferred tools it may reach in this session."""
+    names = set(agent.valid_tool_names)
+    from tools.tool_search_catalog import TOOL_CALL_NAME
+    if TOOL_CALL_NAME in names:
+        from agent.tool_executor import _tool_search_scoped_names
+        names |= _tool_search_scoped_names(agent)
+    return names
+
+
 def _skills_prompt(agent: Any) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
     categories to names-only — never hidden, every name stays visible."""
     if not any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage']):
         return ""
     import model_tools
-    avail_toolsets = {model_tools.get_toolset_for_tool(tool_name) for tool_name in agent.valid_tool_names} - {None, ""}
+    held = _skill_gate_tool_names(agent)
+    avail_toolsets = {model_tools.get_toolset_for_tool(tool_name) for tool_name in held} - {None, ""}
     try:
         from agent.coding_context import coding_compact_skill_categories
         _compact_cats = coding_compact_skill_categories(platform=agent.platform, cwd=resolve_context_cwd())
     except Exception:
         _compact_cats = frozenset()
-    return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
+    return _pb.build_skills_system_prompt(available_tools=held, available_toolsets=avail_toolsets,
                                          compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
 
 
@@ -442,16 +454,20 @@ def _cron_delivery_hint(agent: Any) -> str:
     return f"Delivery destination ({deliver_key}): {hint}" if hint else ""
 
 
-def _cron_scheduling_available() -> bool:
-    """Whether cronjob_manage passes its own availability check in this process. The local-cron
-    note teaches that tool, so a session where the check fails (e.g. a ``-z`` one-shot) must not
-    carry it. Deferral behind the tool search bridge does not matter here: a deferred tool is
-    still callable. True when the check cannot run, which keeps the note."""
+def _cron_scheduling_available(agent: Any) -> bool:
+    """Whether this session can call cronjob_manage. The local-cron note teaches that tool, so a
+    session without it must not carry the note: the tool's availability check fails (e.g. a
+    ``-z`` one-shot) or the session's toolsets exclude it. A tool deferred behind the tool search
+    bridge still counts. True when the check cannot run, which keeps the note."""
     try:
         from tools.cronjob_tools import check_cronjob_requirements
-        return bool(check_cronjob_requirements())
+        if not check_cronjob_requirements():
+            return False
     except Exception:
         return True
+    if getattr(agent, "valid_tool_names", None) is None:
+        return True
+    return "cronjob_manage" in _skill_gate_tool_names(agent)
 
 
 def platform_hint(agent: Any) -> str:
@@ -459,7 +475,7 @@ def platform_hint(agent: Any) -> str:
     override + desktop TUI clarifier; cron agents also carry their delivery channel's hint."""
     platform_key = (agent.platform or "").lower().strip()
     _effective_hint = _resolve_platform_hint(agent, platform_key, _default_platform_hint(platform_key))
-    if _pb._LOCAL_CRON_DELIVERY_NOTE in _effective_hint and not _cron_scheduling_available():
+    if _pb._LOCAL_CRON_DELIVERY_NOTE in _effective_hint and not _cron_scheduling_available(agent):
         _note = _pb._LOCAL_CRON_DELIVERY_NOTE
         _effective_hint = _effective_hint.replace(f" {_note}" if f" {_note}" in _effective_hint else _note, "")
     if platform_key == "tui" and _effective_hint:
