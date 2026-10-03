@@ -85,16 +85,14 @@ Each variant is a **single self-contained HTML file**:
 - Realistic fake content — actual sentences, actual names, not "Lorem ipsum"
 - **Interactive**: links clickable, hovers real, at least one state transition (open/close, filter, toggle). A frozen static image is a worse spike than a sloppy animated one.
 
-Open it in a browser. If it looks broken, fix it before showing the user.
-
-**Verify variants visually — use Hermes' browser tools.** Don't just write HTML and hope it renders; load each variant and look at it:
+**Verify variants visually.** Don't just write HTML and hope it renders; look at each variant and fix anything broken before showing it. If `browser_navigate` and `browser_vision` are in your tool list, load each variant and inspect it:
 
 ```
 browser_navigate(url="file:///absolute/path/to/sketches/001-calm-editorial/index.html")
 browser_vision(question="Does this layout look clean and readable? Any visible bugs (overlapping text, unstyled elements, broken images)?")
 ```
 
-`browser_vision` returns an AI description of what's actually on the page plus a screenshot path — catches layout bugs that pure source inspection misses (e.g. a font import that silently failed, a flex container that collapsed). Fix and re-navigate until each variant looks right.
+`browser_vision` returns an AI description of what's actually on the page plus a screenshot path — catches layout bugs that pure source inspection misses (e.g. a font import that silently failed, a flex container that collapsed). Fix and re-navigate until each variant looks right. Without the browser tools, re-read each file for those failure modes and ask the user to open the variants.
 
 **Default CSS reset + system font stack** for fast starts:
 
@@ -209,8 +207,8 @@ Propose 2-4 named candidates. Let the user pick.
 terminal("mkdir -p sketches/001-calm-editorial")
 write_file("sketches/001-calm-editorial/index.html", "<!doctype html>...")
 write_file("sketches/001-calm-editorial/README.md", "## Variant: Calm editorial\n...")
-browser_navigate(url="file://$(pwd)/sketches/001-calm-editorial/index.html")
-browser_vision(question="How does this look? Any obvious layout issues?")
+browser_navigate(url="file://$(pwd)/sketches/001-calm-editorial/index.html")   # when browser tools are in your tool list
+browser_vision(question="How does this look? Any obvious layout issues?")                 # likewise
 ```
 
 Repeat for each variant, then present the comparison table.
