@@ -1643,6 +1643,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
     # Registry tools: post hook is owned by this executor (inner observer suppressed).
     def _execute(next_args: dict) -> Any:
         import model_tools
+        from agent.system_prompt import _skill_gate_tools_for_call
 
         with model_tools.suppress_post_tool_call_hook():
             return model_tools.handle_function_call(
@@ -1660,6 +1661,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
                 tool_request_middleware_trace=list(middleware_trace),
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                skill_gate_tools=_skill_gate_tools_for_call(agent, function_name),
             )
 
     return _SequentialDispatch(

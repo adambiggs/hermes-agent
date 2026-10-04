@@ -181,10 +181,11 @@ def _skill_search_dirs() -> Tuple[list, list, Path]:
     return project_dirs, all_dirs, active_skills_dir
 
 
-def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
+def _find_all_skills(*, skip_disabled: bool = False, with_conditions: bool = False) -> List[Dict[str, Any]]:
     """All skills (name, description, category) across project/local/external dirs, first-wins
-    by name; cached per session. ``skip_disabled=True`` ignores disabled state (config UI)."""
-    from agent.skill_utils import iter_project_skill_files, iter_skill_index_files
+    by name; cached per session. ``skip_disabled=True`` ignores disabled state (config UI);
+    ``with_conditions=True`` adds each skill's activation ``conditions``."""
+    from agent.skill_utils import extract_skill_conditions, iter_project_skill_files, iter_skill_index_files
     cache_key = "with_disabled" if skip_disabled else "filtered"
     disabled = set() if skip_disabled else _get_disabled_skill_names()
     project_dirs, dirs_to_scan, _ = _skill_search_dirs()
@@ -194,7 +195,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     if cached is not None and cached[0] == signature and (now - cached[1]) < _SKILLS_CACHE_TTL_SECONDS:
         # Shallow copies: callers mutate the returned dicts (web_server annotates
         # s["enabled"]/s["usage"]); handing out cached objects would poison the cache.
-        return [dict(s) for s in cached[2]]
+        return [_skill_entry(s, with_conditions) for s in cached[2]]
     skills = []
     seen_names: set = set()
     for scan_dir in dirs_to_scan:  # project dirs go through the quarantine chokepoint
@@ -215,7 +216,8 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                                         if ln and not ln.startswith("#")), description)
                 seen_names.add(name)
                 skills.append({"name": name, "description": _truncate_description(description),
-                               "category": _get_category_from_path(skill_md)})
+                               "category": _get_category_from_path(skill_md),
+                               "conditions": extract_skill_conditions(frontmatter)})
             except (UnicodeDecodeError, PermissionError) as e:
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)
             except Exception as e:
@@ -223,7 +225,15 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     # Keyed by the signature computed BEFORE the scan: a write racing the scan changes the
     # signature, so the next call re-scans instead of serving a torn result.
     _SKILLS_CACHE[cache_key] = (signature, now, skills)
-    return [dict(s) for s in skills]
+    return [_skill_entry(s, with_conditions) for s in skills]
+
+
+def _skill_entry(skill: Dict[str, Any], with_conditions: bool) -> Dict[str, Any]:
+    """Shallow copy of a cached entry (callers mutate it), without ``conditions`` unless asked."""
+    entry = dict(skill)
+    if not with_conditions:
+        entry.pop("conditions", None)
+    return entry
 
 
 def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -231,17 +241,33 @@ def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(skills, key=lambda s: (s.get("category") or "", s["name"]))
 
 
-def skills_list(category: str = None, task_id: str = None) -> str:
-    """Tier 1 listing: name + description (+ category) only; ``task_id`` is handler parity."""
+def _gate_by_held_tools(held_tools: Optional[set]):
+    """Visibility predicate on a skill's activation conditions: the rule the skills index
+    applies, so a session is never offered a skill built on tools it cannot call.
+    Only the session-platform gate applies when *held_tools* is None (caller without session tool info)."""
+    from agent.prompt_builder import _current_session_platform_hint, _skill_should_show
+    platform = _current_session_platform_hint() or None
+    if held_tools is None:
+        return lambda conditions: _skill_should_show(conditions or {}, None, None, platform)
+    toolsets = {registry.get_toolset_for_tool(t) for t in held_tools} - {None, ""}
+    return lambda conditions: _skill_should_show(conditions or {}, set(held_tools), toolsets, platform)
+
+
+def skills_list(category: str = None, task_id: str = None, held_tools: Optional[set] = None) -> str:
+    """Tier 1 listing: name + description (+ category) only; ``task_id`` is handler parity.
+    *held_tools* (the tools this session can call) hides skills the index hides for it."""
     try:
+        from agent.skill_utils import extract_skill_conditions
         _skills_dir().mkdir(parents=True, exist_ok=True)
-        all_skills = _find_all_skills()
+        shown = _gate_by_held_tools(held_tools)
+        all_skills = [s for s in _find_all_skills(with_conditions=True) if shown(s.pop("conditions", None))]
         try:
             from hermes_cli.plugins import discover_plugins, get_plugin_manager
             discover_plugins()
             for plugin_skill in get_plugin_manager().list_plugin_skill_metadata():
                 frontmatter = plugin_skill.pop("frontmatter", {})
-                if not skill_matches_platform(frontmatter) or _is_skill_disabled(plugin_skill["name"]):
+                if (not skill_matches_platform(frontmatter) or _is_skill_disabled(plugin_skill["name"])
+                        or not shown(extract_skill_conditions(frontmatter))):
                     continue
                 all_skills.append(plugin_skill)
         except Exception:
@@ -687,7 +713,8 @@ SKILL_VIEW_SCHEMA = {
 
 registry.register(
     name="skills_list", toolset="skills", schema=SKILLS_LIST_SCHEMA,
-    handler=lambda args, **kw: skills_list(category=args.get("category"), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: skills_list(category=args.get("category"), task_id=kw.get("task_id"),
+                                           held_tools=kw.get("held_tools")),
     check_fn=check_skills_requirements, emoji="📚")
 
 

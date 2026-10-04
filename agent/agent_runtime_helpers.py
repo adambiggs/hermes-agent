@@ -2421,6 +2421,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
     else:
         def _execute(next_args: dict) -> Any:
+            from agent.system_prompt import _skill_gate_tools_for_call
             dispatch_kwargs = dict(
                 tool_call_id=tool_call_id, session_id=agent.session_id or "",
                 turn_id=getattr(agent, "_current_turn_id", "") or "",
@@ -2430,6 +2431,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 tool_request_middleware_trace=list(_tool_middleware_trace),
+                skill_gate_tools=_skill_gate_tools_for_call(agent, function_name),
             )
             if skip_tool_execution_middleware:
                 dispatch_kwargs["skip_tool_execution_middleware"] = True

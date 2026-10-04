@@ -309,6 +309,14 @@ def _skill_gate_tool_names(agent: Any) -> set:
     return names
 
 
+def _skill_gate_tools_for_call(agent: Any, function_name: str) -> Optional[set]:
+    """The held set a registry dispatch hands ``skills_list`` (directly or through the
+    ``tool_call`` bridge); None for every other tool, which never reads it."""
+    from tools.tool_search_catalog import TOOL_CALL_NAME
+    if function_name not in ("skills_list", TOOL_CALL_NAME):
+        return None
+    return _skill_gate_tool_names(agent)
+
 def _skills_prompt(agent: Any) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
     categories to names-only — never hidden, every name stays visible."""
