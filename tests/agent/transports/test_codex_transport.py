@@ -1339,6 +1339,8 @@ class TestXaiReservedToolSearchAlias:
             names = self._names(kw)
             assert "hermes_tool_search" in names and "tool_search" not in names, extra
             assert transport._last_wire_aliases == {"hermes_tool_search": "tool_search"}
+            aliased = next(t for t in kw["tools"] if t.get("name") == "hermes_tool_search")
+            assert "instructions that name `tool_search` mean this tool" in aliased["description"], extra
 
     def test_other_responses_backend_keeps_tool_search_name(self, transport):
         kw = transport.build_kwargs(

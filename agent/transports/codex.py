@@ -123,15 +123,31 @@ def _is_perplexity_responses_backend(params: dict[str, Any]) -> bool:
         return False
 
 
+def _alias_description(description: Any, original: str) -> str:
+    """An aliased tool's description, naming the reserved name it stands for.
+
+    Prompts, skills and ``tool_describe`` name the tool by its registry name; without this note
+    a model holding only the alias is told to call a tool it does not have.
+    """
+    note = (
+        f"Listed under this name because the provider reserves `{original}`; "
+        f"instructions that name `{original}` mean this tool."
+    )
+    return f"{description}\n\n{note}" if description else note
+
+
 def _alias_reserved_tools(
     response_tools: list[dict[str, Any]], reserved_names: tuple[str, ...],
     name_of: Callable[[dict], Any] = lambda t: t.get("name"),
-    rename: Callable[[dict, str], dict] = lambda t, alias: {**t, "name": alias},
+    rename: Callable[[dict, str, str], dict] = lambda t, alias, original: {
+        **t, "name": alias, "description": _alias_description(t.get("description"), original),
+    },
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Alias provider-reserved function names on the wire; returns ``(tools, {alias: original_name})``.
 
     An alias already taken by a real tool gets a ``_2``/``_3`` suffix. ``name_of``/``rename``
-    adapt the tool shape (Responses ``{name}`` by default; chat_completions passes ``function.name``).
+    adapt the tool shape (Responses ``{name}`` by default; chat_completions passes ``function.name``);
+    ``rename`` also marks the description with the original name (:func:`_alias_description`).
     """
     rewritten: list[dict[str, Any]] = []
     alias_map: dict[str, str] = {}
@@ -147,7 +163,7 @@ def _alias_reserved_tools(
             alias, suffix = f"{base}_{suffix}", suffix + 1
         taken.add(alias)
         alias_map[alias] = name
-        rewritten.append(rename(tool, alias))
+        rewritten.append(rename(tool, alias, name))
     return rewritten, alias_map
 
 
@@ -232,7 +248,11 @@ def _alias_wire_tools(
             response_tools = [t for t in response_tools if not is_client_web_search(t)] + [{"type": "web_search"}]
         else:
             response_tools = [
-                {**t, "name": _XAI_CLIENT_WEB_SEARCH_ALIAS} if is_client_web_search(t) else t for t in response_tools
+                {
+                    **t, "name": _XAI_CLIENT_WEB_SEARCH_ALIAS,
+                    "description": _alias_description(t.get("description"), "web_search"),
+                } if is_client_web_search(t) else t
+                for t in response_tools
             ]
             wire_aliases[_XAI_CLIENT_WEB_SEARCH_ALIAS] = "web_search"
     # OpenAI Codex: the Responses endpoint exposes the same server-executed ``web_search``,

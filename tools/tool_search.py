@@ -486,6 +486,20 @@ def dispatch_tool_search(args: Dict[str, Any], *, current_tool_defs: List[Dict[s
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _bridge_of_wire_alias(name: str) -> Optional[str]:
+    """The bridge tool a reserved-name wire alias (``hermes_tool_search``, ``hermes_tool_search_2``) stands for."""
+    from agent.transports.codex import _RESERVED_TOOL_ALIAS_PREFIX
+
+    if not name.startswith(_RESERVED_TOOL_ALIAS_PREFIX):
+        return None
+    base = name[len(_RESERVED_TOOL_ALIAS_PREFIX):]
+    stem, _, suffix = base.rpartition("_")
+    for candidate in (base, stem if suffix.isdigit() else None):
+        if candidate in BRIDGE_TOOL_NAMES:
+            return candidate
+    return None
+
+
 def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict[str, Any]],
                            config: Optional[ToolSearchConfig] = None,
                            connector_describe: Optional[Any] = None) -> str:
@@ -515,10 +529,16 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
                            "parameters": remote_fn.get("parameters", {})}
         elif is_connector_name(name):
             (undescribed if hosted_failure else not_found).append(name)
+        elif (bridge := _bridge_of_wire_alias(name)) is not None:
+            # The provider reserves the bridge's name, so this session lists the bridge under its alias.
+            errors[name] = f"'{name}' is the bridge tool '{bridge}' under a provider alias. Call it directly."
         elif name in BRIDGE_TOOL_NAMES:
             # current_tool_defs is the pre-assembly catalog, which never holds the bridge;
             # a bridge call means the bridge is in this session, so not_found would deny a live tool.
-            errors[name] = f"'{name}' is a directly-listed bridge tool. Call it directly."
+            errors[name] = (
+                f"'{name}' is a directly-listed bridge tool. Call it directly; a provider that reserves "
+                f"the name lists it under an alias whose description names '{name}'."
+            )
         elif name in session_names and _registry_entry(name) is not None and not is_deferrable_tool_name(
             name, load_config_readonly().effective_defer_tools):
             # In this session but bridge/core/GUI-surface: a real name, wrong door.

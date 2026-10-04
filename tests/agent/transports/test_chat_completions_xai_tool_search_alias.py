@@ -46,14 +46,18 @@ class TestRenameToolSearchBridgeForXai:
         assert out[0]["function"]["name"] == "hermes_tool_search"
         assert alias_map == {"hermes_tool_search": "tool_search"}
 
-    def test_schema_and_description_untouched(self):
+    def test_schema_untouched_and_description_names_the_reserved_name(self):
+        # Prompts and skills say ``tool_search``; the alias's description must tie that name to it.
         fn = {
             "name": "tool_search",
             "description": "Search the deferred tool catalog",
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
         }
         out, _ = _rename_tool_search_bridge_for_xai([{"type": "function", "function": fn}])
-        assert out[0]["function"]["description"] == fn["description"]
+        description = out[0]["function"]["description"]
+        assert description.startswith(fn["description"])
+        assert "instructions that name `tool_search` mean this tool" in description
+        assert fn["description"] == "Search the deferred tool catalog"  # input not mutated
         assert out[0]["function"]["parameters"] == fn["parameters"]
 
     def test_sibling_bridge_names_not_reserved(self):

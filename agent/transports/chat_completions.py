@@ -46,11 +46,14 @@ def _rename_tool_search_bridge_for_xai(tools: list[dict[str, Any]]) -> tuple[lis
 
     If a real tool already holds ``hermes_tool_search``, the bridge takes a ``_2``/``_3`` suffix.
     """
-    from agent.transports.codex import _alias_reserved_tools
+    from agent.transports.codex import _alias_description, _alias_reserved_tools
 
     return _alias_reserved_tools(
         tools, ("tool_search",), name_of=lambda t: (t.get("function") or {}).get("name"),
-        rename=lambda t, alias: {**t, "function": {**t["function"], "name": alias}},
+        rename=lambda t, alias, original: {**t, "function": {
+            **t["function"], "name": alias,
+            "description": _alias_description(t["function"].get("description"), original),
+        }},
     )
 
 

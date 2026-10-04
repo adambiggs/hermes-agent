@@ -460,6 +460,19 @@ class TestBatchedDescribe:
         assert "Call it directly" in result["errors"]["tool_search"]
         assert "not_found" not in result
 
+    def test_bridge_wire_alias_is_the_bridge_not_absent(self, issue_defs):
+        from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
+
+        # Providers that reserve tool_search list the bridge as hermes_tool_search (or _2 on a collision).
+        result = json.loads(dispatch_tool_describe(
+            {"names": ["hermes_tool_search", "hermes_tool_search_2", "hermes_terminal"]},
+            current_tool_defs=issue_defs,
+            config=ToolSearchConfig.from_raw({}),
+        ))
+        assert set(result["errors"]) == {"hermes_tool_search", "hermes_tool_search_2"}
+        assert "bridge tool 'tool_search'" in result["errors"]["hermes_tool_search_2"]
+        assert result["not_found"] == ["hermes_terminal"]
+
     def test_registered_direct_surface_name_keeps_exact_error(self):
         from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
 
