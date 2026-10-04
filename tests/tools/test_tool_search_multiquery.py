@@ -446,6 +446,20 @@ class TestBatchedDescribe:
         assert "terminal" in result["not_found"]
         assert "errors" not in result
 
+    def test_bridge_name_is_directly_listed_not_absent(self, issue_defs):
+        from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
+
+        # The dispatcher passes the pre-assembly catalog, which never holds the bridge.
+        result = json.loads(dispatch_tool_describe(
+            {"names": ["tool_search", "tool_call", "mq_linear_create_issue"]},
+            current_tool_defs=issue_defs,
+            config=ToolSearchConfig.from_raw({}),
+        ))
+        assert "mq_linear_create_issue" in result["tools"]
+        assert set(result["errors"]) == {"tool_search", "tool_call"}
+        assert "Call it directly" in result["errors"]["tool_search"]
+        assert "not_found" not in result
+
     def test_registered_direct_surface_name_keeps_exact_error(self):
         from tools.tool_search import ToolSearchConfig, dispatch_tool_describe
 

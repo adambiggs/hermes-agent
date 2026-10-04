@@ -515,6 +515,10 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
                            "parameters": remote_fn.get("parameters", {})}
         elif is_connector_name(name):
             (undescribed if hosted_failure else not_found).append(name)
+        elif name in BRIDGE_TOOL_NAMES:
+            # current_tool_defs is the pre-assembly catalog, which never holds the bridge;
+            # a bridge call means the bridge is in this session, so not_found would deny a live tool.
+            errors[name] = f"'{name}' is a directly-listed bridge tool. Call it directly."
         elif name in session_names and _registry_entry(name) is not None and not is_deferrable_tool_name(
             name, load_config_readonly().effective_defer_tools):
             # In this session but bridge/core/GUI-surface: a real name, wrong door.
