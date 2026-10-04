@@ -11,7 +11,7 @@
 > <!-- No CDN needed — uses system fonts -->
 > ```
 > Use `write_file` to create HTML, serve via `generative-widgets` skill (cloudflared tunnel).
-> Verify visual accuracy with `browser_vision` after generating.
+> When `browser_vision` is in your tool list, verify visual accuracy with it after generating.
 
 ## 1. Visual Theme & Atmosphere
 
