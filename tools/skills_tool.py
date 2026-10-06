@@ -287,7 +287,14 @@ def skills_list(category: str = None, task_id: str = None, held_tools: Optional[
         return tool_error(str(e), success=False)
 
 
-def _resolve_plugin_skill(name, file_path, task_id, preprocess):
+def _visible_skill_names(held_tools: Optional[set], namespace: Optional[str] = None) -> list[str]:
+    """Suggestions share discovery's gates, including plugin and project skills."""
+    listed = json.loads(skills_list(held_tools=held_tools))
+    return [s["name"] for s in listed.get("skills", [])
+            if namespace is None or s["name"].startswith(f"{namespace}:")]
+
+
+def _resolve_plugin_skill(name, file_path, task_id, preprocess, held_tools=None):
     """``plugin:skill`` dispatch: ``(result_json, None)`` when answered, else ``(None,
     local_category_name)`` to fall through to the flat-tree scan — categorized local skills also use
     ``category:skill`` in config/gateway prompts, so the on-disk ``category/skill`` form returns."""
@@ -322,12 +329,13 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
             f"has been cleaned up — try again after the plugin is reloaded."), None
     if plugin_skill_md is not None:
         return _serve_plugin_skill(
-            plugin_skill_md, namespace, bare, file_path=file_path, preprocess=preprocess, session_id=task_id), None
-    if available := pm.list_plugin_skills(namespace):  # plugin exists but this specific skill is missing
+            plugin_skill_md, namespace, bare, file_path=file_path, preprocess=preprocess, session_id=task_id,
+            held_tools=held_tools), None
+    if pm.list_plugin_skills(namespace):  # plugin exists but this specific skill is missing
         return _fail(
             f"Skill '{bare}' not found in plugin '{namespace}'.",
-            available_skills=[f"{namespace}:{s}" for s in available],
-            hint=f"The '{namespace}' plugin provides {len(available)} skill(s)."), None
+            available_skills=_visible_skill_names(held_tools, namespace),
+            hint="Use skills_list to see available skills."), None
     return None, (f"{namespace}/{bare}" if bare else None)  # plugin not found → local scan
 
 
@@ -526,7 +534,7 @@ def _provably_same_skill(candidates) -> bool:
         return False
 
 
-def _locate_skill(name: str, local_category_name: Optional[str], project_dirs: list, all_dirs):
+def _locate_skill(name: str, local_category_name: Optional[str], project_dirs: list, all_dirs, held_tools=None):
     """Unique on-disk skill for *name*: collision refusal, project-tier precedence, same-root
     precedence, quarantine gate, not-found listing. ``(error_json, skill_dir, skill_md)``;
     skill_md set iff no error."""
@@ -573,7 +581,7 @@ def _locate_skill(name: str, local_category_name: Optional[str], project_dirs: l
                 hint="Inspect the skill in the repo checkout, or untrust the repo with "
                 "`hermes skills untrust`."), None, None
     if not skill_md or not skill_md.exists():
-        available = [s["name"] for s in _sort_skills(_find_all_skills())[:20]]
+        available = _visible_skill_names(held_tools)[:20]
         return _fail(f"Skill '{name}' not found.", available_skills=available,
                      hint="Use skills_list to see all available skills"), None, None
     return None, skill_dir, skill_md
@@ -597,7 +605,8 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
 
 
 def skill_view(
-    name: str, file_path: str = None, task_id: str = None, preprocess: bool = True) -> str:
+    name: str, file_path: str = None, task_id: str = None, preprocess: bool = True,
+    held_tools: Optional[set] = None) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
     or path ("axolotl", "03-fine-tuning/axolotl"); "plugin:skill" resolves plugin-provided
     skills. ``preprocess`` applies the configured SKILL.md template / inline shell rendering;
@@ -609,7 +618,7 @@ def skill_view(
             return _fail(lookup_error, hint=_LOOKUP_HINT)
         local_category_name: str | None = None
         if ":" in name:  # plugin registry; bare names use the flat-tree scan below
-            served, local_category_name = _resolve_plugin_skill(name, file_path, task_id, preprocess)
+            served, local_category_name = _resolve_plugin_skill(name, file_path, task_id, preprocess, held_tools)
             if served is not None:
                 return served
         # The fall-through form (namespace/bare) joins onto each search dir too; re-validate it
@@ -618,7 +627,7 @@ def skill_view(
             return _fail(lookup_error, hint=_LOOKUP_HINT)
         project_dirs, all_dirs, active_skills_dir = _skill_search_dirs()
         error, skill_dir, skill_md = _locate_skill(
-            name, local_category_name, project_dirs, all_dirs)
+            name, local_category_name, project_dirs, all_dirs, held_tools)
         if error is not None:
             return error
         try:  # read once — reused for platform check and main content
@@ -731,7 +740,7 @@ def _skill_view_with_bump(args, **kw):
     dedup_task_id = None if is_background_review() else task_id
     if (stub := _check_skill_view_dedup(dedup_task_id, name, args.get("file_path"))) is not None:
         return stub
-    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id)
+    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id, held_tools=kw.get("held_tools"))
     with suppress(Exception):
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):

@@ -875,7 +875,7 @@ def _execute_tool(function_name: str, function_args: Dict[str, Any], original_ar
         dispatch_kwargs["enabled_tools"] = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
     else:
         dispatch_kwargs["user_task"] = user_task
-    if function_name == "skills_list":
+    if function_name in ("skills_list", "skill_view"):
         dispatch_kwargs["held_tools"] = skill_gate_tools
 
     def _dispatch(next_args: Dict[str, Any]) -> Any:
@@ -932,8 +932,8 @@ def handle_function_call(
     ``_last_resolved_tool_names``). skip_pre_tool_call_hook: caller already fired
     it (single-fire contract). enabled/disabled_toolsets scope the Tool Search
     bridge catalog to this session's grant (None = unrestricted). skill_gate_tools:
-    the tools a skill gate counts as held, so skills_list hides what the skills
-    index hides (None = list every skill).
+    the tools a skill gate counts as held, so discovery and lookup suggestions
+    hide what the skills index hides (None = list every skill).
     """
     function_args = coerce_tool_args(function_name, function_args)
     if not isinstance(function_args, dict):

@@ -122,9 +122,9 @@ def _preprocess_skill(content: str, skill_dir, session_id, debug_msg: str, *args
 
 def _serve_plugin_skill(
     skill_md: Path, namespace: str, bare: str, file_path: str | None = None, *,
-    preprocess: bool = True, session_id: str | None = None) -> str:
+    preprocess: bool = True, session_id: str | None = None, held_tools: set | None = None) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
-    from hermes_cli.plugins import _get_disabled_plugins, get_plugin_manager
+    from hermes_cli.plugins import _get_disabled_plugins
     from tools import skills_tool as _st
     if namespace in _get_disabled_plugins():
         return _fail(f"Plugin '{namespace}' is disabled. Re-enable with: hermes plugins enable {namespace}")
@@ -146,7 +146,8 @@ def _serve_plugin_skill(
             "Plugin skill '%s:%s' contains patterns that may indicate prompt injection", namespace, bare)
     banner = ""
     with suppress(Exception):  # bundle-context banner: sibling skills of the same plugin
-        siblings = [s for s in get_plugin_manager().list_plugin_skills(namespace) if s != bare]
+        siblings = [s.split(":", 1)[1] for s in _st._visible_skill_names(held_tools, namespace)
+                    if s != qualified_name]
         banner = f"[Bundle context: This skill is part of the '{namespace}' plugin." + (
             f"\nSibling skills: {', '.join(siblings)}.\nUse qualified form to invoke siblings "
             f"(e.g. {namespace}:{siblings[0]})." if siblings else "") + "]\n\n"

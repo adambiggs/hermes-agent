@@ -310,10 +310,10 @@ def _skill_gate_tool_names(agent: Any) -> set:
 
 
 def _skill_gate_tools_for_call(agent: Any, function_name: str) -> Optional[set]:
-    """The held set a registry dispatch hands ``skills_list`` (directly or through the
+    """The held set a registry dispatch hands skill discovery (directly or through the
     ``tool_call`` bridge); None for every other tool, which never reads it."""
     from tools.tool_search_catalog import TOOL_CALL_NAME
-    if function_name not in ("skills_list", TOOL_CALL_NAME):
+    if function_name not in ("skills_list", "skill_view", TOOL_CALL_NAME):
         return None
     return _skill_gate_tool_names(agent)
 

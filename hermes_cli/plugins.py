@@ -1010,13 +1010,17 @@ class PluginContext:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"SKILL.md not found at {path}")
+        if frontmatter is None:
+            # Omitted discovery metadata must retain the file's tool prerequisites.
+            from agent.skill_utils import parse_frontmatter
+            frontmatter, _ = parse_frontmatter(path.read_text(encoding="utf-8-sig", errors="replace"))
         namespace = self.manifest.skill_namespace or self.manifest.name
         qualified = f"{namespace}:{name}"
         if self.manifest.portable and qualified in self._manager._plugin_skills:
             raise ValueError(f"Plugin skill '{qualified}' is already registered")
         entry = {
             "path": path, "plugin": namespace, "plugin_key": self.plugin_id, "bare_name": name,
-            "description": description, "frontmatter": dict(frontmatter or {}),
+            "description": description, "frontmatter": dict(frontmatter),
         }
         return self._register_entry("skill", qualified, self._manager._plugin_skills, entry,
                                     "Plugin %s registered skill: %s", qualified)
