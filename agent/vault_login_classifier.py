@@ -308,15 +308,20 @@ _FILL_JS_TEMPLATE = """(() => {
   const fills = __FILLS__;
   const nonce = __NONCE__;
   let filled = 0;
+  const unfilled = new Set();
   const norm = (t) => String(t || "").trim().toLowerCase();
   for (const f of fills) {
     const el = document.querySelector('[data-hermes-vault-slot="' + nonce + ':' + f.index + '"]');
-    if (!el || (f.token === "current-password" && el.type !== "password")) continue;
+    if (!el) { unfilled.add("target_missing"); continue; }
+    if (f.token === "current-password" && el.type !== "password") {
+      unfilled.add("password_type_changed"); continue;
+    }
     try {
       if (el.tagName === "SELECT") {
         const want = norm(f.value);
         const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => norm(t) === want || norm(t) === want.replace(/^0/, "")));
         if (opt) { el.value = opt.value; el.dispatchEvent(new Event("change", { bubbles: true })); filled += 1; }
+        else { unfilled.add("option_not_found"); }
         continue;
       }
       el.focus();
@@ -326,8 +331,9 @@ _FILL_JS_TEMPLATE = """(() => {
       el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
       if (el.value.length > 0) filled += 1;
-    } catch (e) { /* skip */ }
+      else unfilled.add("value_empty");
+    } catch (e) { unfilled.add("write_exception"); }
   }
   document.querySelectorAll("[data-hermes-vault-slot]").forEach((n) => n.removeAttribute("data-hermes-vault-slot"));
-  return JSON.stringify({ filled });
+  return JSON.stringify({ filled, unfilled_reasons: Array.from(unfilled) });
 })()"""

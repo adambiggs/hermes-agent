@@ -176,6 +176,21 @@ def _parse_json_result(raw: Any) -> Any:
     return raw
 
 
+def _fill_result_error(parsed: Any) -> Optional[Dict[str, Any]]:
+    # An absent or malformed CDP result is not evidence that the page filled zero controls.
+    if not isinstance(parsed, dict) or type(parsed.get("filled")) is not int or parsed["filled"] < 0:
+        return {"error_type": "invalid_fill_result",
+                "error": "The browser did not return a valid fill count."}
+    if parsed["filled"]:
+        return None
+    reasons = parsed.get("unfilled_reasons")
+    if not isinstance(reasons, list):
+        reasons = []
+    known = ("target_missing", "password_type_changed", "option_not_found", "write_exception", "value_empty")
+    return {"error_type": "zero_fill_count", "error": "The browser reported zero completed field fills.",
+            "unfilled_reasons": [reason for reason in known if reason in reasons]}
+
+
 def _current_page_origin(task_id: str) -> Optional[str]:
     res = _eval_js(task_id, "window.location.href")
     if not res.get("success"):
@@ -392,9 +407,13 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
         parsed = _parse_json_result(parsed)
     if isinstance(parsed, dict) and parsed.get("refused") == "origin_changed":
         return json.dumps({"success": False, "error_type": "origin_changed", "error": "The page navigated before the code could be entered. Nothing was written."})
-    filled = int(parsed.get("filled", 0)) if isinstance(parsed, dict) else 0
+    error = _fill_result_error(parsed)
+    if error and error["error_type"] == "invalid_fill_result":
+        return json.dumps({"success": False, **error})
+    filled = parsed["filled"]
     return json.dumps({"success": bool(filled), "filled_fields": filled, "origin": origin, "source": source,
-                       "next": "Submit the form (many sites auto-submit when the last digit lands)."})
+                       "next": "Submit the form (many sites auto-submit when the last digit lands).",
+                       **(error or {})})
 
 
 def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
@@ -557,10 +576,13 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
                 ),
             }
         )
-    filled = parsed.get("filled", 0) if isinstance(parsed, dict) else 0
+    error = _fill_result_error(parsed)
+    if error and error["error_type"] == "invalid_fill_result":
+        return json.dumps({"success": False, **error})
+    filled = parsed["filled"]
 
-    out = {"success": bool(filled), "filled_fields": int(filled), "backend": backend.name,
-           "kind": meta.kind, "origin": page_origin}
+    out = {"success": bool(filled), "filled_fields": filled, "backend": backend.name,
+           "kind": meta.kind, "origin": page_origin, **(error or {})}
     if meta.kind == "login":
         out["next"] = ("Submit. If the site then asks for a verification code, call browser_vault_enter_code with this handle"
                        + (" (a code will be generated automatically)." if meta.has_otp else "."))
