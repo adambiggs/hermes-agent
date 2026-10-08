@@ -300,40 +300,66 @@ def build_fill_js(fills: List[Dict[str, Any]], expected_origin: str, nonce: str 
             .replace("__FILLS__", payload).replace("__NONCE__", json.dumps(nonce)))
 
 
-_FILL_JS_TEMPLATE = """(() => {
+_FILL_JS_TEMPLATE = """(async () => {
   const expectedOrigin = __EXPECTED_ORIGIN__;
-  if (window.location.origin !== expectedOrigin) {
-    return JSON.stringify({ refused: "origin_changed", found: window.location.origin });
-  }
-  const fills = __FILLS__;
   const nonce = __NONCE__;
-  let filled = 0;
-  const unfilled = new Set();
-  const norm = (t) => String(t || "").trim().toLowerCase();
-  for (const f of fills) {
-    const el = document.querySelector('[data-hermes-vault-slot="' + nonce + ':' + f.index + '"]');
-    if (!el) { unfilled.add("target_missing"); continue; }
-    if (f.token === "current-password" && el.type !== "password") {
-      unfilled.add("password_type_changed"); continue;
+  const slot = (index) => '[data-hermes-vault-slot="' + nonce + ':' + index + '"]';
+  const pending = [];
+  const targets = [];
+  try {
+    if (window.location.origin !== expectedOrigin) {
+      return JSON.stringify({ refused: "origin_changed", found: window.location.origin });
     }
-    try {
-      if (el.tagName === "SELECT") {
-        const want = norm(f.value);
-        const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => norm(t) === want || norm(t) === want.replace(/^0/, "")));
-        if (opt) { el.value = opt.value; el.dispatchEvent(new Event("change", { bubbles: true })); filled += 1; }
-        else { unfilled.add("option_not_found"); }
-        continue;
+    const fills = __FILLS__;
+    let filled = 0;
+    const unfilled = new Set();
+    const norm = (t) => String(t || "").trim().toLowerCase();
+    for (const f of fills) {
+      const el = document.querySelector(slot(f.index));
+      if (!el) { unfilled.add("target_missing"); continue; }
+      targets.push({ el, index: f.index });
+      if (f.token === "current-password" && el.type !== "password") {
+        unfilled.add("password_type_changed"); continue;
       }
-      el.focus();
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
-      // one-time-code split into single-character boxes: f.value is the slice for THIS box (see build_otp_fills)
-      if (setter && setter.set) { setter.set.call(el, f.value); } else { el.value = f.value; }
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      if (el.value.length > 0) filled += 1;
-      else unfilled.add("value_empty");
-    } catch (e) { unfilled.add("write_exception"); }
+      try {
+        if (el.tagName === "SELECT") {
+          const want = norm(f.value);
+          const opt = Array.from(el.options).find((o) => [o.value, o.textContent].some((t) => norm(t) === want || norm(t) === want.replace(/^0/, "")));
+          if (opt) { el.value = opt.value; el.dispatchEvent(new Event("change", { bubbles: true })); pending.push({ el, index: f.index, token: f.token }); }
+          else { unfilled.add("option_not_found"); }
+          continue;
+        }
+        el.focus();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+        // one-time-code split into single-character boxes: f.value is the slice for THIS box (see build_otp_fills)
+        if (setter && setter.set) { setter.set.call(el, f.value); } else { el.value = f.value; }
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        pending.push({ el, index: f.index, token: f.token });
+      } catch (e) { unfilled.add("write_exception"); }
+    }
+    // Controlled inputs can restore old props before their deferred state update runs.
+    if (pending.length) await new Promise((resolve) => setTimeout(resolve, 0));
+    if (window.location.origin !== expectedOrigin) {
+      return JSON.stringify({ refused: "origin_changed", found: window.location.origin });
+    }
+    for (const { el, index, token } of pending) {
+      if (!el.isConnected || document.querySelector(slot(index)) !== el) {
+        unfilled.add("target_missing"); continue;
+      }
+      if (token === "current-password" && el.type !== "password") {
+        unfilled.add("password_type_changed"); continue;
+      }
+      try {
+        if (el.tagName === "SELECT" || el.value.length > 0) filled += 1;
+        else unfilled.add("value_empty");
+      } catch (e) { unfilled.add("write_exception"); }
+    }
+    return JSON.stringify({ filled, unfilled_reasons: Array.from(unfilled) });
+  } finally {
+    targets.forEach(({ el, index }) => {
+      if (el.getAttribute("data-hermes-vault-slot") === nonce + ':' + index) el.removeAttribute("data-hermes-vault-slot");
+    });
+    document.querySelectorAll('[data-hermes-vault-slot^="' + nonce + ':"]').forEach((n) => n.removeAttribute("data-hermes-vault-slot"));
   }
-  document.querySelectorAll("[data-hermes-vault-slot]").forEach((n) => n.removeAttribute("data-hermes-vault-slot"));
-  return JSON.stringify({ filled, unfilled_reasons: Array.from(unfilled) });
 })()"""

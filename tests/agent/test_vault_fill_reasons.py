@@ -21,9 +21,10 @@ let writes = 0;
 class HTMLInputElement {
   constructor() { this._value = ""; this.type = scenario === "password_type_changed" ? "text" : "password";
     this.tagName = scenario === "option_not_found" ? "SELECT" : "INPUT"; this.options = [];
-    this.marker = scenario === "target_missing" ? null : "synthetic:0"; }
+    this.marker = scenario === "target_missing" ? null : "synthetic:0"; this.isConnected = true; }
   focus() {}
   dispatchEvent() {}
+  getAttribute() { return this.marker; }
   removeAttribute() { this.marker = null; }
 }
 Object.defineProperty(HTMLInputElement.prototype, "value", {
@@ -40,8 +41,10 @@ const document = {
 const window = { location: { origin: scenario === "origin_changed" ? "https://other.example" : "https://example.com" } };
 class InputEvent {}
 class Event {}
-const result = JSON.parse(EXPRESSION);
+(async () => {
+const result = JSON.parse(await EXPRESSION);
 console.log(JSON.stringify({ result, writes, marker_present: element.marker !== null }));
+})().catch(error => { console.error(error); process.exit(1); });
 '''
     script = setup.replace("SCENARIO", json.dumps(scenario)).replace("EXPRESSION", expression)
     proc = subprocess.run(["node", "-"], input=script, text=True, capture_output=True, check=True, timeout=10)
@@ -50,7 +53,7 @@ console.log(JSON.stringify({ result, writes, marker_present: element.marker !== 
     if reason == "origin_changed":
         assert out["result"]["refused"] == reason
         assert out["writes"] == 0
-        assert out["marker_present"] is True
+        assert out["marker_present"] is False
     else:
         assert out["result"]["filled"] == (1 if reason is None else 0)
         assert out["result"]["unfilled_reasons"] == ([] if reason is None else [reason])
